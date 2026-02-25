@@ -1,0 +1,91 @@
+{
+  "version": "1.0.0",
+  "workflow": "deletion",
+  "lastUpdated": "2026-02-25",
+  "selectors": {
+    "login_username": {
+      "id": "login_username",
+      "description": "ログインユーザー名入力",
+      "primary": "#username",
+      "fallbacks": ["input[name='username']", "input[type='text']:first-of-type"],
+      "context": "ログインページのユーザー名入力フィールド"
+    },
+    "login_password": {
+      "id": "login_password",
+      "description": "ログインパスワード入力",
+      "primary": "#password",
+      "fallbacks": ["input[name='password']", "input[type='password']"],
+      "context": "ログインページのパスワード入力フィールド"
+    },
+    "login_submit": {
+      "id": "login_submit",
+      "description": "ログインボタン",
+      "primary": "button[type='submit']",
+      "fallbacks": ["input[type='submit']", ".login-btn", "button:has-text('ログイン')"],
+      "context": "ログインフォームの送信ボタン"
+    },
+    "main_dashboard": {
+      "id": "main_dashboard",
+      "description": "メインダッシュボード（ログイン成功確認）",
+      "primary": ".main-content",
+      "fallbacks": ["#main", ".dashboard", "nav.main-nav"],
+      "context": "ログイン後のメインダッシュボード要素"
+    },
+    "menu_deletion": {
+      "id": "menu_deletion",
+      "description": "削除メニュー",
+      "primary": "a[href*='delete']",
+      "fallbacks": ["a:has-text('削除')", ".menu-item:has-text('削除')"],
+      "context": "メニューバーの削除機能リンク"
+    },
+    "search_patient_name": {
+      "id": "search_patient_name",
+      "description": "患者名検索入力",
+      "primary": "#patient-search",
+      "fallbacks": ["input[name='patientName']", "input[placeholder*='利用者']"],
+      "context": "患者名を検索するための入力フィールド"
+    },
+    "search_button": {
+      "id": "search_button",
+      "description": "検索ボタン",
+      "primary": "button.search-btn",
+      "fallbacks": ["button:has-text('検索')", "input[type='submit'][value='検索']"],
+      "context": "検索フォームの実行ボタン"
+    },
+    "patient_list_names": {
+      "id": "patient_list_names",
+      "description": "患者一覧の名前リスト",
+      "primary": "table.patient-list td.name",
+      "fallbacks": [".patient-row .name", "tr.patient td:first-child"],
+      "context": "検索結果の患者名リスト"
+    },
+    "delete_button": {
+      "id": "delete_button",
+      "description": "削除ボタン",
+      "primary": "button.delete-btn",
+      "fallbacks": ["button:has-text('削除')", "a.delete-link"],
+      "context": "レコードを削除するためのボタン"
+    },
+    "confirm_delete_button": {
+      "id": "confirm_delete_button",
+      "description": "削除確認ボタン",
+      "primary": "button.confirm-delete",
+      "fallbacks": ["button:has-text('はい')", ".modal button.btn-danger"],
+      "context": "削除確認ダイアログの確定ボタン"
+    },
+    "delete_success_indicator": {
+      "id": "delete_success_indicator",
+      "description": "削除成功インジケーター",
+      "primary": ".success-message",
+      "fallbacks": [".alert-success", "div:has-text('削除しました')"],
+      "context": "削除が成功したことを示すメッセージ"
+    },
+    "error_message": {
+      "id": "error_message",
+      "description": "エラーメッセージ",
+      "primary": ".error-message",
+      "fallbacks": [".alert-danger", ".alert-error", "div.error"],
+      "context": "エラーが発生した際に表示されるメッセージ"
+    }
+  }
+}

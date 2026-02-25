@@ -18,12 +18,14 @@
     "dotenv": "^16.4.7",
     "googleapis": "^144.0.0",
     "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
     "playwright": "^1.50.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^6.4.16",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.0.18"

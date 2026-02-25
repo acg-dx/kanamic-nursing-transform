@@ -1,0 +1,112 @@
+{
+  "version": "1.0.0",
+  "workflow": "staff-sync",
+  "lastUpdated": "2026-02-25",
+  "selectors": {
+    "login_username": {
+      "id": "login_username",
+      "description": "ログインユーザー名入力",
+      "primary": "#username",
+      "fallbacks": ["input[name='username']", "input[type='text']:first-of-type"],
+      "context": "ログインページのユーザー名入力フィールド"
+    },
+    "login_password": {
+      "id": "login_password",
+      "description": "ログインパスワード入力",
+      "primary": "#password",
+      "fallbacks": ["input[name='password']", "input[type='password']"],
+      "context": "ログインページのパスワード入力フィールド"
+    },
+    "login_submit": {
+      "id": "login_submit",
+      "description": "ログインボタン",
+      "primary": "button[type='submit']",
+      "fallbacks": ["input[type='submit']", ".login-btn", "button:has-text('ログイン')"],
+      "context": "ログインフォームの送信ボタン"
+    },
+    "main_dashboard": {
+      "id": "main_dashboard",
+      "description": "メインダッシュボード（ログイン成功確認）",
+      "primary": ".main-content",
+      "fallbacks": ["#main", ".dashboard", "nav.main-nav"],
+      "context": "ログイン後のメインダッシュボード要素"
+    },
+    "menu_staff": {
+      "id": "menu_staff",
+      "description": "スタッフ管理メニュー",
+      "primary": "a[href*='staff']",
+      "fallbacks": ["a:has-text('スタッフ')", ".menu-item:has-text('スタッフ')"],
+      "context": "メニューバーのスタッフ管理機能リンク"
+    },
+    "staff_search_input": {
+      "id": "staff_search_input",
+      "description": "スタッフ検索入力",
+      "primary": "input#staffSearch",
+      "fallbacks": ["input[name='staffName']", "input[placeholder*='スタッフ']"],
+      "context": "スタッフ名を検索するための入力フィールド"
+    },
+    "staff_search_button": {
+      "id": "staff_search_button",
+      "description": "スタッフ検索ボタン",
+      "primary": "button.staff-search-btn",
+      "fallbacks": ["button:has-text('検索')"],
+      "context": "スタッフ検索を実行するボタン"
+    },
+    "staff_list_items": {
+      "id": "staff_list_items",
+      "description": "スタッフ一覧",
+      "primary": "table.staff-list tr.staff-row",
+      "fallbacks": [".staff-item", "tr[data-staff]"],
+      "context": "検索結果のスタッフリスト"
+    },
+    "add_staff_button": {
+      "id": "add_staff_button",
+      "description": "スタッフ追加ボタン",
+      "primary": "button.add-staff",
+      "fallbacks": ["button:has-text('スタッフ追加')", "a:has-text('新規登録')"],
+      "context": "新規スタッフを追加するボタン"
+    },
+    "staff_number_input": {
+      "id": "staff_number_input",
+      "description": "従業員番号入力",
+      "primary": "input#staffNumber",
+      "fallbacks": ["input[name='empCode']", "input[placeholder*='従業員番号']"],
+      "context": "従業員番号を入力するフィールド"
+    },
+    "staff_name_input": {
+      "id": "staff_name_input",
+      "description": "スタッフ名入力",
+      "primary": "input#staffName",
+      "fallbacks": ["input[name='staffName']", "input[placeholder*='氏名']"],
+      "context": "スタッフの氏名を入力するフィールド"
+    },
+    "staff_name_yomi_input": {
+      "id": "staff_name_yomi_input",
+      "description": "スタッフ名フリガナ入力",
+      "primary": "input#staffNameYomi",
+      "fallbacks": ["input[name='staffNameYomi']", "input[placeholder*='フリガナ']"],
+      "context": "スタッフ氏名のフリガナを入力するフィールド"
+    },
+    "save_button": {
+      "id": "save_button",
+      "description": "保存ボタン",
+      "primary": "button#save",
+      "fallbacks": ["button[type='submit']", "button:has-text('保存')"],
+      "context": "入力内容を保存するボタン"
+    },
+    "save_success_indicator": {
+      "id": "save_success_indicator",
+      "description": "保存成功インジケーター",
+      "primary": ".success-message",
+      "fallbacks": [".alert-success"],
+      "context": "保存が成功したことを示すメッセージ"
+    },
+    "error_message": {
+      "id": "error_message",
+      "description": "エラーメッセージ",
+      "primary": ".error-message",
+      "fallbacks": [".alert-danger", "div.error"],
+      "context": "エラーが発生した際に表示されるメッセージ"
+    }
+  }
+}

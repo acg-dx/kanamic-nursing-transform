@@ -1,0 +1,105 @@
+{
+  "version": "1.0.0",
+  "workflow": "building",
+  "lastUpdated": "2026-02-25",
+  "selectors": {
+    "login_username": {
+      "id": "login_username",
+      "description": "ログインユーザー名入力",
+      "primary": "#username",
+      "fallbacks": ["input[name='username']", "input[type='text']:first-of-type"],
+      "context": "ログインページのユーザー名入力フィールド"
+    },
+    "login_password": {
+      "id": "login_password",
+      "description": "ログインパスワード入力",
+      "primary": "#password",
+      "fallbacks": ["input[name='password']", "input[type='password']"],
+      "context": "ログインページのパスワード入力フィールド"
+    },
+    "login_submit": {
+      "id": "login_submit",
+      "description": "ログインボタン",
+      "primary": "button[type='submit']",
+      "fallbacks": ["input[type='submit']", ".login-btn", "button:has-text('ログイン')"],
+      "context": "ログインフォームの送信ボタン"
+    },
+    "main_dashboard": {
+      "id": "main_dashboard",
+      "description": "メインダッシュボード（ログイン成功確認）",
+      "primary": ".main-content",
+      "fallbacks": ["#main", ".dashboard", "nav.main-nav"],
+      "context": "ログイン後のメインダッシュボード要素"
+    },
+    "menu_building": {
+      "id": "menu_building",
+      "description": "同一建物管理メニュー",
+      "primary": "a[href*='building']",
+      "fallbacks": ["a:has-text('同一建物')", ".menu-item:has-text('建物')"],
+      "context": "メニューバーの同一建物管理機能リンク"
+    },
+    "facility_search_input": {
+      "id": "facility_search_input",
+      "description": "施設名検索",
+      "primary": "input#facilitySearch",
+      "fallbacks": ["input[name='facilityName']", "input[placeholder*='施設']"],
+      "context": "施設名を検索するための入力フィールド"
+    },
+    "facility_search_button": {
+      "id": "facility_search_button",
+      "description": "施設検索ボタン",
+      "primary": "button.facility-search-btn",
+      "fallbacks": ["button:has-text('施設検索')", "button:has-text('検索')"],
+      "context": "施設検索を実行するボタン"
+    },
+    "facility_list_items": {
+      "id": "facility_list_items",
+      "description": "施設一覧",
+      "primary": "table.facility-list tr.facility-row",
+      "fallbacks": [".facility-item", "tr[data-facility]"],
+      "context": "検索結果の施設リスト"
+    },
+    "add_user_button": {
+      "id": "add_user_button",
+      "description": "利用者追加ボタン",
+      "primary": "button.add-user",
+      "fallbacks": ["button:has-text('利用者追加')", "a:has-text('追加')"],
+      "context": "施設に利用者を追加するボタン"
+    },
+    "user_name_input": {
+      "id": "user_name_input",
+      "description": "利用者名入力",
+      "primary": "input#userName",
+      "fallbacks": ["input[name='userName']", "input[placeholder*='利用者名']"],
+      "context": "利用者の名前を入力するフィールド"
+    },
+    "user_id_input": {
+      "id": "user_id_input",
+      "description": "あおぞらID入力",
+      "primary": "input#aozoraId",
+      "fallbacks": ["input[name='aozoraId']", "input[placeholder*='ID']"],
+      "context": "あおぞらシステムの利用者IDを入力するフィールド"
+    },
+    "save_button": {
+      "id": "save_button",
+      "description": "保存ボタン",
+      "primary": "button#save",
+      "fallbacks": ["button[type='submit']", "button:has-text('保存')"],
+      "context": "入力内容を保存するボタン"
+    },
+    "save_success_indicator": {
+      "id": "save_success_indicator",
+      "description": "保存成功インジケーター",
+      "primary": ".success-message",
+      "fallbacks": [".alert-success", "div:has-text('保存しました')"],
+      "context": "保存が成功したことを示すメッセージ"
+    },
+    "error_message": {
+      "id": "error_message",
+      "description": "エラーメッセージ",
+      "primary": ".error-message",
+      "fallbacks": [".alert-danger", ".alert-error", "div.error"],
+      "context": "エラーが発生した際に表示されるメッセージ"
+    }
+  }
+}
