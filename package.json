@@ -1,0 +1,31 @@
+{
+  "name": "kanamick-rpa",
+  "version": "1.0.0",
+  "description": "Kanamick RPA自动化系统 - 转记/删除/同一建物管理",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "workflow:transcription": "tsx src/index.ts --workflow transcription",
+    "workflow:deletion": "tsx src/index.ts --workflow deletion",
+    "workflow:building": "tsx src/index.ts --workflow building",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "playwright": "^1.50.0",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
+  }
+}
