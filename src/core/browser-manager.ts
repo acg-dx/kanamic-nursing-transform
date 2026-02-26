@@ -37,6 +37,12 @@ export class BrowserManager {
     return this._page;
   }
 
+  /** BrowserContext を取得（auth.setContext() に渡す用） */
+  get browserContext(): BrowserContext {
+    if (!this.context) throw new Error('BrowserContext が未初期化です。launch()を先に呼んでください');
+    return this.context;
+  }
+
   async launch(): Promise<void> {
     logger.info('ブラウザ起動中...');
     this.browser = await chromium.launch({

@@ -49,12 +49,14 @@ function createServices() {
   const selectorEngine = new SelectorEngine(aiHealing);
   const sheets = new SpreadsheetService(config.sheets.serviceAccountKeyPath);
   const browser = new BrowserManager(selectorEngine);
-  const auth = new KanamickAuthService(
-    browser,
-    config.kanamick.url,
-    config.kanamick.username,
-    config.kanamick.password
-  );
+  const auth = new KanamickAuthService({
+    url: config.kanamick.url,
+    username: config.kanamick.username,
+    password: config.kanamick.password,
+    stationName: process.env.KANAMICK_STATION_NAME || '訪問看護ステーションあおぞら姶良',
+    hamOfficeKey: process.env.KANAMICK_HAM_OFFICE_KEY || '6',
+    hamOfficeCode: process.env.KANAMICK_HAM_OFFICE_CODE || '400021814',
+  });
   return { browser, selectorEngine, sheets, auth };
 }
 
@@ -63,7 +65,8 @@ async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'buildin
 
   try {
     await browser.launch();
-    await auth.login(workflowName);
+    auth.setContext(browser.browserContext);
+    await auth.login();
 
     const context: WorkflowContext = {
       workflowName,
@@ -117,6 +120,7 @@ async function runDailyJob(): Promise<void> {
       try {
         const { browser, selectorEngine, auth } = createServices();
         await browser.launch();
+        auth.setContext(browser.browserContext);
         try {
           const smarthr = new SmartHRService(smarthrConfig);
           const staffSync = new StaffSyncService(smarthr, browser, selectorEngine, auth);

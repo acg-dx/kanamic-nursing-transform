@@ -44,7 +44,7 @@ export class StaffSyncService {
 
       logger.info(`SmartHR: ${staffEntries.length}名のスタッフを取得`);
 
-      await this.auth.ensureLoggedIn(WORKFLOW_NAME);
+      await this.auth.ensureLoggedIn();
 
       for (const staff of staffEntries) {
         if (!staff.staffNumber || !staff.staffName) {

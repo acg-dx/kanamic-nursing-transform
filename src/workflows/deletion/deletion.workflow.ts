@@ -72,7 +72,7 @@ export class DeletionWorkflow extends BaseWorkflow {
   }
 
   private async processRecord(record: DeletionRecord, sheetId: string): Promise<void> {
-    await this.auth.ensureLoggedIn(WORKFLOW_NAME);
+    await this.auth.ensureLoggedIn();
 
     // 削除メニューへ移動
     await this.browser.safeClick('menu_deletion', WORKFLOW_NAME);

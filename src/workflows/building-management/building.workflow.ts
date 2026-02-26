@@ -80,7 +80,7 @@ export class BuildingManagementWorkflow extends BaseWorkflow {
     records: BuildingManagementRecord[],
     sheetId: string
   ): Promise<void> {
-    await this.auth.ensureLoggedIn(WORKFLOW_NAME);
+    await this.auth.ensureLoggedIn();
 
     // 同一建物管理メニューへ移動
     await this.browser.safeClick('menu_building', WORKFLOW_NAME);

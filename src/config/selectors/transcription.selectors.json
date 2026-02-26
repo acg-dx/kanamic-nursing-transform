@@ -1,147 +1,269 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "workflow": "transcription",
   "lastUpdated": "2026-02-25",
-  "selectors": {
-    "login_username": {
-      "id": "login_username",
-      "description": "ログインユーザー名入力",
-      "primary": "#username",
-      "fallbacks": ["input[name='username']", "input[type='text']:first-of-type"],
-      "context": "ログインページのユーザー名入力フィールド"
+  "description": "Real selectors extracted from live Kanamick HAM system via Playwright on 2026-02-25",
+  "frameStructure": {
+    "description": "HAM uses nested framesets. All interactions must target the correct frame.",
+    "hamPage": "page.context().pages()[1]",
+    "kanamicmain": "hamPage.frame('kanamicmain') - contains topFrame + mainFrame",
+    "mainFrame": "hamPage.frames().find(f => f.url().includes('pageId=...'))",
+    "note": "After navigation, frame URLs change. Always re-find frames by URL pattern after each submit."
+  },
+  "navigation": {
+    "formSubmission": {
+      "description": "HAM uses form submission for all navigation, not links",
+      "standardPattern": "submited = 0; form.doAction.value = '{action}'; form.target = 'commontarget'; form.doTarget.value = 'commontarget'; form.submit();",
+      "resetSubmitLock": "submited = 0; // MUST reset before each submission or form won't submit"
     },
-    "login_password": {
-      "id": "login_password",
-      "description": "ログインパスワード入力",
-      "primary": "#password",
-      "fallbacks": ["input[name='password']", "input[type='password']"],
-      "context": "ログインページのパスワード入力フィールド"
-    },
-    "login_submit": {
-      "id": "login_submit",
-      "description": "ログインボタン",
-      "primary": "button[type='submit']",
-      "fallbacks": ["input[type='submit']", ".login-btn", "button:has-text('ログイン')"],
-      "context": "ログインフォームの送信ボタン"
-    },
-    "main_dashboard": {
-      "id": "main_dashboard",
-      "description": "メインダッシュボード（ログイン成功確認）",
-      "primary": ".main-content",
-      "fallbacks": ["#main", ".dashboard", "nav.main-nav"],
-      "context": "ログイン後のメインダッシュボード要素"
-    },
-    "menu_results": {
-      "id": "menu_results",
-      "description": "実績入力メニュー",
-      "primary": "a[href*='results']",
-      "fallbacks": ["a:has-text('実績')", ".menu-item:has-text('実績')"],
-      "context": "メニューバーの実績入力リンク"
-    },
-    "search_patient_name": {
-      "id": "search_patient_name",
-      "description": "患者名検索入力",
-      "primary": "#patient-search",
-      "fallbacks": ["input[name='patientName']", "input[placeholder*='利用者']"],
-      "context": "患者名を検索するための入力フィールド"
-    },
-    "search_button": {
-      "id": "search_button",
-      "description": "検索ボタン",
-      "primary": "button.search-btn",
-      "fallbacks": ["button:has-text('検索')", "input[type='submit'][value='検索']"],
-      "context": "検索フォームの実行ボタン"
-    },
-    "patient_list_names": {
-      "id": "patient_list_names",
-      "description": "患者一覧の名前リスト",
-      "primary": "table.patient-list td.name",
-      "fallbacks": [".patient-row .name", "tr.patient td:first-child"],
-      "context": "検索結果の患者名リスト"
-    },
-    "service_type1_select": {
-      "id": "service_type1_select",
-      "description": "支援区分1選択（医療/介護）",
-      "primary": "select#serviceType1",
-      "fallbacks": ["select[name='serviceType1']", "select.service-type-1"],
-      "context": "医療・介護の区分を選択するセレクトボックス"
-    },
-    "service_type2_select": {
-      "id": "service_type2_select",
-      "description": "支援区分2選択（通常/リハビリ等）",
-      "primary": "select#serviceType2",
-      "fallbacks": ["select[name='serviceType2']", "select.service-type-2"],
-      "context": "通常・リハビリ等の詳細区分を選択するセレクトボックス"
-    },
-    "start_time_input": {
-      "id": "start_time_input",
-      "description": "開始時刻入力",
-      "primary": "input#startTime",
-      "fallbacks": ["input[name='startTime']", "input.start-time"],
-      "context": "サービス開始時刻を入力するフィールド"
-    },
-    "end_time_input": {
-      "id": "end_time_input",
-      "description": "終了時刻入力",
-      "primary": "input#endTime",
-      "fallbacks": ["input[name='endTime']", "input.end-time"],
-      "context": "サービス終了時刻を入力するフィールド"
-    },
-    "staff_name_input": {
-      "id": "staff_name_input",
-      "description": "担当者名入力",
-      "primary": "input#staffName",
-      "fallbacks": ["input[name='staffName']", "input.staff-name"],
-      "context": "担当スタッフ名を入力するフィールド"
-    },
-    "accompany_checkbox": {
-      "id": "accompany_checkbox",
-      "description": "同行チェックボックス",
-      "primary": "input#accompany",
-      "fallbacks": ["input[name='accompany']", "input[type='checkbox'].accompany"],
-      "context": "同行サービスの有無を示すチェックボックス"
-    },
-    "accompany_clerk_checkbox": {
-      "id": "accompany_clerk_checkbox",
-      "description": "同行事務員チェックボックス",
-      "primary": "input#accompanyClerk",
-      "fallbacks": ["input[name='accompanyClerk']", "input[type='checkbox'].accompany-clerk"],
-      "context": "事務員が同行する場合のチェックボックス"
-    },
-    "emergency_clerk_checkbox": {
-      "id": "emergency_clerk_checkbox",
-      "description": "緊急時事務員チェックボックス",
-      "primary": "input#emergencyClerk",
-      "fallbacks": ["input[name='emergencyClerk']", "input[type='checkbox'].emergency-clerk"],
-      "context": "緊急時に事務員が対応する場合のチェックボックス"
-    },
-    "multiple_visit_checkbox": {
-      "id": "multiple_visit_checkbox",
-      "description": "複数名訪問チェックボックス",
-      "primary": "input#multipleVisit",
-      "fallbacks": ["input[name='multipleVisit']", "input[type='checkbox'].multiple-visit"],
-      "context": "複数のスタッフが訪問する場合のチェックボックス"
-    },
-    "save_button": {
-      "id": "save_button",
-      "description": "保存ボタン",
-      "primary": "button#save",
-      "fallbacks": ["button[type='submit'].save", "button:has-text('保存')", "input[value='保存']"],
-      "context": "入力内容を保存するボタン"
-    },
-    "save_success_indicator": {
-      "id": "save_success_indicator",
-      "description": "保存成功インジケーター",
-      "primary": ".success-message",
-      "fallbacks": [".alert-success", "div:has-text('保存しました')"],
-      "context": "保存が成功したことを示すメッセージ"
-    },
-    "error_message": {
-      "id": "error_message",
-      "description": "エラーメッセージ",
-      "primary": ".error-message",
-      "fallbacks": [".alert-danger", ".alert-error", "div.error"],
-      "context": "エラーが発生した際に表示されるメッセージ"
+    "menuActions": {
+      "visitNursingGuide": "act_k1_1",
+      "userScheduleList": "act_k2_1",
+      "staffMaster_HAM": "act_h1-1",
+      "userMaster_HAM": "act_u1-1",
+      "backToMainMenu": "act_back"
     }
+  },
+  "selectors": {
+    "tritrus_login": {
+      "description": "TRITRUS portal login page",
+      "url": "https://portal.kanamic.net/tritrus/index/",
+      "username": "input#userId",
+      "password": "input#password",
+      "loginButton": "button.btn-login",
+      "postLogin": {
+        "categorySelect": "select for service category - select '\u8a2a\u554f\u770b\u8b77'",
+        "searchButton": "button with text '\u691c\u7d22'",
+        "hamLink": "Link containing target office name with href to hamfromout.go (k=6 for \u59f6\u826f)"
+      }
+    },
+    "popup_close": {
+      "description": "Close venobox system notice popup that appears on HAM main menu load",
+      "closeButton": "div.vbox-close",
+      "note": "Check if popup exists before clicking; may not always appear"
+    },
+
+    "k2_1_userSearch": {
+      "pageId": "k2_1",
+      "formName": "k2_1Form",
+      "formAction": "/kanamic/ham/k2_1Action.go",
+      "description": "\u5229\u7528\u8005\u691c\u7d22\u30da\u30fc\u30b8 - Search and select a patient",
+      "selects": {
+        "yearMonth": { "name": "searchdate", "valueFormat": "YYYYMM01", "example": "20260201" },
+        "userGroup": { "name": "searchUsergroup", "defaultValue": "" },
+        "searchCondition": {
+          "name": "searchkind",
+          "options": {
+            "50onOrder": "1", "todayScheduled": "30", "medicalBilling": "35",
+            "longTermCareOnly": "42", "unapprovedApplying": "33",
+            "supportLevel1": "23", "supportLevel2": "24",
+            "careLevel1": "10", "careLevel2": "11", "careLevel3": "12",
+            "careLevel4": "13", "careLevel5": "14"
+          }
+        }
+      },
+      "buttons": {
+        "search": { "name": "act_search_word", "action": "submitTargetForm(form, 'act_search')" },
+        "back": { "name": "act_back", "action": "submitTargetForm(form, 'k1_1')" }
+      },
+      "kanaSearch": {
+        "selector": "div.xinwork_dispcursor",
+        "functionCall": "xinwork_searchKeyword(document.forms[0], '{KATAKANA}', 'act_keyword')"
+      },
+      "patientRow": {
+        "scheduleButton": {
+          "name": "act_result", "value": "\u6c7a\u5b9a",
+          "programmatic": "form.doAction.value='k2_2'; form.careuserid.value='{ID}'; form.target='commontarget'; form.doTarget.value='commontarget'; form.submit();"
+        }
+      },
+      "hiddenFields": { "careuserid": "Patient ID (e.g. 8806571)", "servicedate": "YYYYMMDD", "keyword": "Search keyword (katakana)" }
+    },
+
+    "k2_2_monthlySchedule": {
+      "pageId": "k2_2",
+      "formName": "k2_2Form",
+      "formAction": "/kanamic/ham/k2_2Action.go",
+      "description": "\u5229\u7528\u8005\u6708\u9593\u30b9\u30b1\u30b8\u30e5\u30fc\u30eb - Monthly schedule with day-by-day rows",
+      "selects": {
+        "yearMonth": { "name": "servicedate", "valueFormat": "YYYYMM01" },
+        "cancelFee": { "name": "canselFeeFlgs", "options": { "default": "-1", "yes": "1", "no": "0" } },
+        "cancelSalary": { "name": "canselSalaryFlgs", "options": { "default": "-1", "yes": "1", "no": "0" } }
+      },
+      "buttons": {
+        "overwriteSave": { "name": "act_update", "value": "\u4e0a\u66f8\u304d\u4fdd\u5b58", "pre": "form.lockCheck.value='1'" },
+        "addSchedule": {
+          "name": "act_addnew", "value": "\u8ffd\u52a0",
+          "programmatic": "form.lockCheck.value='1'; form.doAction.value='act_addnew'; form.editdate.value='YYYYMMDD'; form.target='commontarget'; form.doTarget.value='commontarget'; form.submit();"
+        },
+        "i5Input": { "name": "act_i5", "value": "\u8a2a\u770b\u22601\uff15\u5165\u529b", "pre": "form.lockCheck.value='1'" },
+        "batchInput": { "name": "act_month", "value": "\u4e00\u62ec\u5165\u529b" },
+        "selectAll1": { "name": "act_chooseall", "value": "\u51681", "action": "checkAllAndSet1('results')" },
+        "batchPlacement": { "name": "act_modifyall", "value": "\u4e00\u62ec\u914d\u7f6e" },
+        "search": { "name": "act_search", "value": "\u691c\u7d22" },
+        "back": { "name": "act_back", "value": "\u623b\u308b" }
+      },
+      "scheduleRow": {
+        "editButton": { "name": "act_edit", "value": "\u7de8\u96c6" },
+        "deleteButton": { "name": "act_delete", "value": "\u524a\u9664", "action": "confirmDelete('{assignid}', '{delAlertFlag}')" },
+        "staffPlacement": {
+          "name": "act_modify", "value": "\u914d\u7f6e",
+          "programmatic": "form.lockCheck.value='1'; form.doAction.value='act_modify'; form.assignid.value='{assignid}'; form.target='commontarget'; form.doTarget.value='commontarget'; form.submit();"
+        },
+        "urgentCheckbox": { "name": "urgentflags", "description": "\u7dca\u6025\u6642\u52a0\u7b97 checkbox (value=1 when checked)" }
+      },
+      "hiddenFields": {
+        "careuserid": "Patient ID",
+        "updatemonth": "YYYYMM01",
+        "assignid": "Schedule record ID (unique per entry)",
+        "editdate": "Target date YYYYMMDD",
+        "lockCheck": "Set to '1' before any modification submit"
+      }
+    },
+
+    "k2_3_scheduleAdd": {
+      "pageId": "k2_3",
+      "formName": "k2_3Form",
+      "formAction": "/kanamic/ham/k2_3Action.go",
+      "description": "\u30b9\u30b1\u30b8\u30e5\u30fc\u30eb\u8ffd\u52a0 - Set time and duration for new schedule entry",
+      "selects": {
+        "editDate": { "name": "editdate", "valueFormat": "YYYYMMDD" },
+        "startTimePeriod": { "name": "starttype", "options": { "daytime": "1", "nightMorning": "2", "lateNight": "3", "unspecified": "0" } },
+        "startHour": { "name": "starttime0", "range": "08-17 for daytime" },
+        "startMinute": { "name": "starttime1", "range": "00-59" },
+        "durationCategory": {
+          "name": "timetype",
+          "options": { "unset": "0", "under20min": "20", "exactly20min": "21", "under30min": "30", "under1hour": "60", "under1hour30min": "90", "over1hour30min": "91" }
+        },
+        "endTimePeriod": { "name": "endtype", "options": { "daytime": "1", "nightMorning": "2", "lateNight": "3", "unspecified": "0" } },
+        "endHour": { "name": "endtime0", "range": "00-23, \u7fcc\u65e500-\u7fcc\u65e505" },
+        "endMinute": { "name": "endtime1", "range": "00-59" }
+      },
+      "buttons": {
+        "next": { "name": "act_next", "value": "\u6b21\u3078", "navigatesTo": "k2_3a" },
+        "back": { "name": "act_back", "value": "\u623b\u308b", "navigatesTo": "k2_2" }
+      }
+    },
+
+    "k2_3a_serviceCodeSelect": {
+      "pageId": "k2_3a",
+      "formName": "k2_3aForm",
+      "description": "\u30b5\u30fc\u30d3\u30b9\u30b3\u30fc\u30c9\u9078\u629e - Select the service code (radio button list)",
+      "serviceCodeRadio": {
+        "name": "radio",
+        "valueFormat": "{servicetype}#{serviceitem}",
+        "examples": { "houkanI2": "13#1111", "houkanI2_jun": "13#1121", "houkanI2_fuku11": "13#1114" }
+      },
+      "insuranceTypeSwitch": {
+        "buttons": {
+          "kaigo": { "name": "change_flag", "value": "\u8a2a\u554f\u770b\u8b77", "showflag": "1" },
+          "yobo": { "name": "change_flag", "value": "\u4e88\u9632\u8a2a\u554f\u770b\u8b77", "showflag": "2" },
+          "iryo": { "name": "change_flag", "value": "\u8a2a\u554f\u770b\u8b77\u7642\u990a\u8cbb", "showflag": "3" }
+        },
+        "hiddenField": "showflag"
+      },
+      "hiddenFields": {
+        "servicetype": "e.g. 13=\u8a2a\u554f\u770b\u8b77",
+        "serviceitem": "e.g. 1111",
+        "servicename": "Service display name",
+        "servicepoint": "Unit count",
+        "showflag": "1=kaigo, 2=yobo, 3=iryo",
+        "longcareflag": "0 or 1",
+        "pluralnurseflag1": "0 or 1",
+        "pluralnurseflag2": "0 or 1"
+      },
+      "programmaticSelection": "form.querySelector('input[name=\"radio\"][value=\"{type}#{code}\"]').checked=true; form.servicetype.value='{type}'; form.serviceitem.value='{code}'; var o=document.getElementsByName('{type}#{code}'); if(o.length>0) form.servicepoint.value=o.item(0).value;",
+      "buttons": {
+        "next": { "name": "act_next", "value": "\u6b21\u3078", "navigatesTo": "k2_3b" },
+        "back": { "name": "act_back", "value": "\u623b\u308b" }
+      }
+    },
+
+    "k2_3b_confirmation": {
+      "pageId": "k2_3b",
+      "formName": "k2_3bForm",
+      "description": "\u78ba\u8a8d\u753b\u9762 - Confirm and create the schedule entry",
+      "buttons": {
+        "confirm": { "name": "act_do", "value": "\u6c7a\u5b9a", "navigatesTo": "k2_2" },
+        "back": { "name": "act_back", "value": "\u623b\u308b", "navigatesTo": "k2_3a" }
+      }
+    },
+
+    "k2_2f_staffPlacement": {
+      "pageId": "k2_2f",
+      "formName": "k2_2fForm",
+      "description": "\u30b9\u30bf\u30c3\u30d5\u914d\u7f6e - Assign staff to a schedule entry",
+      "selects": {
+        "workStartHour": { "name": "newstarthour", "range": "00-23, \u7fcc\u65e500-05" },
+        "workStartMinute": { "name": "newstartminute", "range": "00-59" },
+        "workEndHour": { "name": "newendhour", "range": "00-23, \u7fcc\u65e500-05" },
+        "workEndMinute": { "name": "newendminute", "range": "00-59" }
+      },
+      "buttons": {
+        "addStaff": { "name": "act_addnew", "value": "\u30b9\u30bf\u30c3\u30d5\u8ffd\u52a0", "note": "May open popup window" },
+        "place": { "name": "act_select", "value": "\u914d\u7f6e" },
+        "delete": { "name": "act_delete", "value": "\u524a\u9664" },
+        "back": { "name": "act_back", "value": "\u623b\u308b", "navigatesTo": "k2_2" }
+      },
+      "hiddenFields": {
+        "assignid": "Schedule record ID",
+        "helperid": "Staff ID to assign",
+        "seq": "Sequence (0-based)",
+        "showflag": "Insurance type"
+      }
+    },
+
+    "k2_7_1_i5Input": {
+      "pageId": "k2_7_1",
+      "formName": "k2_7_1Form",
+      "description": "\u8a2a\u770b\u22601\uff15\u5165\u529b - Batch input for \u4ecb\u8b77\u30ea\u30cf\u30d3\u30ea (3 time groups)",
+      "timeGroups": {
+        "count": 3,
+        "selects": {
+          "startTimePeriod": "starttimetype",
+          "startHour": "starthour",
+          "startMinute": "startminute",
+          "endHour": "endhour",
+          "endMinute": "endminute"
+        },
+        "serviceCount": "\u30e9\u30b8\u30aa: 1\u56de / 2\u56de / 3\u56de",
+        "checkboxes": {
+          "gyakubo": "gyakuboFlag[{index}] - \u8650\u5f85\u9632\u6b62",
+          "sakutei": "sakuteiFlag[{index}] - \u696d\u52d9\u672a\u5b9f\u65bd"
+        }
+      },
+      "buttons": {
+        "serviceSearch": { "name": "act_search", "value": "\u30b5\u30fc\u30d3\u30b9\u691c\u7d22" },
+        "back": { "name": "act_back", "value": "\u623b\u308b", "navigatesTo": "k2_2" }
+      }
+    }
+  },
+
+  "functions": {
+    "submitTargetForm": "submitTargetForm(formObject, doValue) - Standard form submit",
+    "submitTargetFormEx": "submitTargetFormEx(formObject, doValue, hiddenObject, value) - Sets hidden field then submits",
+    "submitTargetFormExp": "submitTargetFormExp(formObject, doValue, hiddenObject, aValue) - Parses day from aValue, sets date field",
+    "submitServicePoint": "submitServicePoint(formObject, buttonName) - Calls savePoint() then submitTargetForm()",
+    "xinwork_searchKeyword": "xinwork_searchKeyword(formObject, katakana, actionName) - 50-on kana search",
+    "confirmDelete": "confirmDelete(assignid, delAlertFlag) - Confirm dialog + delete"
+  },
+
+  "workflowSequence": {
+    "description": "Complete transcription flow for one record",
+    "steps": [
+      "1. Navigate to k2_1 (user search) via act_k2_1 from business guide",
+      "2. Set searchdate (year/month), search by kana or condition to find patient",
+      "3. Click \u6c7a\u5b9a to enter k2_2 (monthly schedule) for the patient",
+      "4. Click \u8ffd\u52a0 button with target editdate to enter k2_3 (schedule add)",
+      "5. Set start time, timetype (duration), end time in k2_3",
+      "6. Click \u6b21\u3078 to enter k2_3a (service code selection)",
+      "7. Switch insurance type if needed (showflag 1/2/3), select radio button for service code",
+      "8. Click \u6b21\u3078 to enter k2_3b (confirmation)",
+      "9. Click \u6c7a\u5b9a to confirm - returns to k2_2",
+      "10. From k2_2, click \u914d\u7f6e for the new record to enter k2_2f (staff placement)",
+      "11. Set helperid, work times, click \u914d\u7f6e to assign staff",
+      "12. Return to k2_2, set urgentflags checkbox if needed",
+      "13. Click \u4e0a\u66f8\u304d\u4fdd\u5b58 to save all changes",
+      "14. Repeat for next patient/record"
+    ]
   }
 }

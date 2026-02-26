@@ -107,8 +107,21 @@ describe('SmartHRService', () => {
 
       expect(entry.staffNumber).toBe('EMP001');
       expect(entry.staffName).toBe('山田 太郎');
+      expect(entry.staffNameLegal).toBe('山田 太郎');
       expect(entry.staffNameYomi).toBe('ヤマダ タロウ');
       expect(entry.qualifications).toEqual([]);
+    });
+
+    it('prefers business name over legal name', () => {
+      const crewWithBizName: SmartHRCrew = {
+        ...mockCrew1,
+        business_last_name: '田中',
+        business_first_name: '次郎',
+      };
+
+      const entry = service.toStaffMasterEntry(crewWithBizName);
+      expect(entry.staffName).toBe('田中 次郎');
+      expect(entry.staffNameLegal).toBe('山田 太郎');
     });
 
     it('handles missing yomi fields gracefully', () => {
