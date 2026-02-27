@@ -53,7 +53,7 @@ export function loadConfig(): AppConfig {
       buildingMgmtSheetId: BUILDING_MGMT_SHEET_ID,
     },
     aiHealing: {
-      apiKey: requireEnv('OPENAI_API_KEY'),
+      apiKey: process.env.OPENAI_API_KEY || '',
       model: process.env.AI_HEALING_MODEL || 'gpt-4o',
       maxAttempts: parseInt(process.env.AI_HEALING_MAX_ATTEMPTS || '3', 10),
     },
