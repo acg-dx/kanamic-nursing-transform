@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
 import type { Page } from 'playwright';
@@ -6,12 +6,12 @@ import { logger } from './logger';
 import type { AIHealingResult } from '../types/selector.types';
 
 export class AIHealingService {
-  private client: Anthropic;
+  private client: OpenAI;
   private model: string;
   private screenshotDir: string;
 
   constructor(apiKey: string, model: string) {
-    this.client = new Anthropic({ apiKey });
+    this.client = new OpenAI({ apiKey });
     this.model = model;
     this.screenshotDir = process.env.SCREENSHOT_DIR || './screenshots';
   }
@@ -63,7 +63,7 @@ Requirements:
 - Confidence should be between 0 and 1
 - If you cannot find a suitable selector, set confidence to 0`;
 
-      const response = await this.client.messages.create({
+      const response = await this.client.chat.completions.create({
         model: this.model,
         max_tokens: 500,
         messages: [
@@ -71,11 +71,9 @@ Requirements:
             role: 'user',
             content: [
               {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: 'image/png',
-                  data: base64Image,
+                type: 'image_url',
+                image_url: {
+                  url: `data:image/png;base64,${base64Image}`,
                 },
               },
               {
@@ -87,16 +85,16 @@ Requirements:
         ],
       });
 
-      const content = response.content[0];
-      if (content.type !== 'text') {
-        logger.warn(`AI自愈: 予期しないレスポンスタイプ: ${content.type}`);
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        logger.warn('AI自愈: レスポンスが空です');
         return null;
       }
 
       // JSONパース
-      const jsonMatch = content.text.match(/\{[\s\S]*\}/);
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        logger.warn(`AI自愈: JSONが見つかりません: ${content.text}`);
+        logger.warn(`AI自愈: JSONが見つかりません: ${content}`);
         return null;
       }
 

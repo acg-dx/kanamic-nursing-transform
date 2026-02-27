@@ -36,8 +36,8 @@ export function loadConfig(): AppConfig {
       buildingMgmtSheetId: BUILDING_MGMT_SHEET_ID,
     },
     aiHealing: {
-      apiKey: requireEnv('ANTHROPIC_API_KEY'),
-      model: process.env.AI_HEALING_MODEL || 'claude-sonnet-4-6',
+      apiKey: requireEnv('OPENAI_API_KEY'),
+      model: process.env.AI_HEALING_MODEL || 'gpt-4o',
       maxAttempts: parseInt(process.env.AI_HEALING_MAX_ATTEMPTS || '3', 10),
     },
     scheduling: {
