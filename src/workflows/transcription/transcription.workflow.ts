@@ -253,8 +253,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       setLockCheck: true,
       hiddenFields: { editdate: visitDateHam },
       waitForPageId: 'k2_3',
+      timeout: 30000,
     });
-    await this.sleep(1000);
+    await this.sleep(2000);
     await this.checkForSyserror(nav);
     logger.debug(`Step 5: スケジュール追加画面に遷移 (日付=${visitDateHam})`);
 
@@ -288,13 +289,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 終了時間は HAM 自動値のまま（手動修正するとエラーになる。専務確認済み 2026-02-26）
 
     // 次へ → k2_3a
-    await nav.submitForm({ action: 'act_next', waitForPageId: 'k2_3a' });
-    await this.sleep(1000);
+    await nav.submitForm({ action: 'act_next', waitForPageId: 'k2_3a', timeout: 30000 });
+    await this.sleep(2000);
     logger.debug(`Step 6: 時間設定完了 (${record.startTime}-${record.endTime}, timetype=${timetype})`);
 
     // === Step 7: k2_3a でサービスコード選択 ===
     await nav.switchInsuranceType(codeResult.showflag);
-    await this.sleep(1500); // 保険種別切替後のリロード待ち
+    await this.sleep(2000); // 保険種別切替後のリロード待ち
     await nav.selectServiceCode(codeResult.servicetype, codeResult.serviceitem, undefined, codeResult.textPattern);
     logger.debug(`Step 7: サービスコード選択完了 (${codeResult.servicetype}#${codeResult.serviceitem})`);
 
