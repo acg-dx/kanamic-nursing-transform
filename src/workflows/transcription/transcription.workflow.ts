@@ -26,6 +26,7 @@ import { ServiceCodeResolver } from '../../services/service-code-resolver';
 import { PatientMasterService } from '../../services/patient-master.service';
 import type { ServiceCodeResult } from '../../services/service-code-resolver';
 import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart } from '../../services/time-utils';
+import type { Frame } from 'playwright';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError, TranscriptionStatus } from '../../types/workflow.types';
 import type { TranscriptionRecord } from '../../types/spreadsheet.types';
@@ -343,89 +344,140 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.checkForSyserror(nav);
     logger.debug(`Step 9: スタッフ配置画面に遷移 (assignId=${assignId})`);
 
-    // === Step 10: k2_2f でスタッフ選択（2段階操作） ===
-    // Stage 1: k2_2f の配置ボタンクリック → 従業員リスト表示
+    // === Step 10: k2_2f でスタッフ選択（Playwright native click + HAM choice() 関数） ===
+    // Stage 1: k2_2f の配置ボタンを Playwright native click
     const k2_2fFrame = await nav.getMainFrame('k2_2f');
-    await k2_2fFrame.evaluate(() => {
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      const win = window as any;
-      win.submited = 0;
-      const form = document.forms[0];
-      if (typeof win.setTime === 'function') {
-        const sh = (form.newstarthour || form.starthour)?.value || '';
-        const sm = (form.newstartminute || form.startminute)?.value || '';
-        const eh = (form.newendhour || form.endhour)?.value || '';
-        const em = (form.newendminute || form.endminute)?.value || '';
-        win.setTime(sh, sm, eh, em);
-      }
-      if (typeof win.submitTargetForm === 'function') {
-        win.submitTargetForm(form, 'act_select');
-      } else {
-        form.doAction.value = 'act_select';
-        form.target = 'commontarget';
-        if (form.doTarget) form.doTarget.value = 'commontarget';
-        form.submit();
-      }
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-    });
-    await this.sleep(2000);
+    await k2_2fFrame.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+    const haichi1Btn = await k2_2fFrame.$('input[name="act_select"][value="配置"]');
+    if (haichi1Btn) {
+      await haichi1Btn.click();
+    } else {
+      logger.warn('配置ボタンが見つかりません。フォーム送信にフォールバック');
+      await nav.submitForm({ action: 'act_select' });
+    }
+    await this.sleep(3000);
     logger.debug('Step 10: k2_2f 配置ボタンクリック → 従業員リスト待ち');
 
-    // 「選択」ボタンが出現するまで待機
-    let staffListFrame = await nav.getMainFrame();
-    for (let i = 0; i < 15; i++) {
-      const hasList = await staffListFrame.evaluate(() =>
-        document.querySelectorAll('input[name="act_select"][value="選択"]').length > 0
-      ).catch(() => false);
-      if (hasList) break;
-      await this.sleep(1000);
-      staffListFrame = await nav.getMainFrame();
-    }
-
-    // Stage 2: 従業員リストからスタッフを検索して選択
-    const staffId = await this.findStaffId(nav, record.staffName);
-    if (!staffId) {
-      logger.warn(`スタッフ ID が見つかりません: ${record.staffName}。配置画面で手動設定が必要です`);
-    }
-
-    const staffFrame = await nav.getMainFrame();
-    await staffFrame.evaluate((hid) => {
-      /* eslint-disable @typescript-eslint/no-explicit-any */
-      const win = window as any;
-      win.submited = 0;
-      const form = document.forms[0];
-      if (form.helperid) {
-        form.helperid.value = hid;
-      } else {
-        const hidden = document.createElement('input');
-        hidden.type = 'hidden';
-        hidden.name = 'helperid';
-        hidden.value = hid;
-        form.appendChild(hidden);
+    // Stage 2: 従業員リスト表示待ち（全フレームから検索）
+    const hamPage = nav.hamPage;
+    let staffFrame: Frame | null = null;
+    for (let i = 0; i < 20; i++) {
+      const allFrames = hamPage.frames();
+      for (const f of allFrames) {
+        const hasList = await f.evaluate(() =>
+          document.querySelectorAll('input[name="act_select"][value="選択"]').length > 0
+        ).catch(() => false);
+        if (hasList) { staffFrame = f; break; }
       }
-      form.doAction.value = 'act_select';
-      form.target = 'commontarget';
-      if (form.doTarget) form.doTarget.value = 'commontarget';
-      form.submit();
-      /* eslint-enable @typescript-eslint/no-explicit-any */
-    }, staffId || '');
+      if (staffFrame) break;
+      await this.sleep(1000);
+    }
+    if (!staffFrame) {
+      throw new Error('従業員選択リストが表示されません');
+    }
 
-    await nav.waitForMainFrame('k2_2', 15000);
-    await this.sleep(1000);
-    logger.debug(`Step 10: スタッフ配置完了 (staffId=${staffId || 'N/A'})`);
+    // Stage 3: スタッフ検索 + HAM choice() 呼び出し
+    const staffSearchName = record.staffName.replace(/[\s\u3000]+/g, '');
+    const choiceResult = await staffFrame.evaluate((searchName: string) => {
+      const rows = Array.from(document.querySelectorAll('tr'));
+      for (const row of rows) {
+        const rowText = (row.textContent || '').replace(/[\s\u3000\u00a0]+/g, '');
+        if (!rowText.includes(searchName)) continue;
+        const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
+        if (!selectBtn || selectBtn.disabled) continue;
+        const onclick = selectBtn.getAttribute('onclick') || '';
+        const m = onclick.match(/choice\(this,\s*'(\d+)',\s*'([^']+)',\s*(\d+)\)/);
+        if (!m) continue;
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).submited = 0;
+        if (typeof (window as any).choice === 'function') {
+          (window as any).choice(selectBtn, m[1], m[2], 1);
+          return { found: true, helperId: m[1], staffName: m[2] };
+        }
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+        selectBtn.click();
+        return { found: true, helperId: m[1], staffName: m[2] };
+      }
+      return { found: false, helperId: '', staffName: '' };
+    }, staffSearchName);
 
-    // === Step 10.5: 上書き保存（1回目: 配置確定） ===
-    // 配置後に保存しないと実績(results) 入力欄が出現しない
-    await nav.submitForm({
-      action: 'act_update',
-      setLockCheck: true,
-      waitForPageId: 'k2_2',
-    });
-    await this.sleep(2000);
-    logger.debug('Step 10.5: 上書き保存（1回目: 配置確定）');
+    if (!choiceResult.found) {
+      throw new Error(`スタッフ「${record.staffName}」が見つかりません（HAMに登録されていません）`);
+    }
+    await this.sleep(3000);
+
+    // Stage 4: 確認画面の決定ボタンクリック
+    let confirmClicked = false;
+    for (let retry = 0; retry < 10; retry++) {
+      const allFrames2 = hamPage.frames();
+      for (const f of allFrames2) {
+        try {
+          const hasConfirm = await f.evaluate(() => {
+            const body = document.body?.innerText || '';
+            return body.includes('スタッフでよろしければ') || body.includes('決定');
+          }).catch(() => false);
+          if (hasConfirm) {
+            const ketteBtn = await f.$('input[value="決定"]');
+            if (ketteBtn) {
+              await f.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+              await ketteBtn.click();
+              confirmClicked = true;
+              break;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+      if (confirmClicked) break;
+      await this.sleep(1000);
+    }
+    await this.sleep(3000);
+    logger.debug(`Step 10: スタッフ配置完了 (${choiceResult.staffName})`);
+
+    // === Step 10.5: k2_2f で「戻る」→ k2_2 に戻る ===
+    let backClicked = false;
+    const allFramesForBack = hamPage.frames();
+    for (const f of allFramesForBack) {
+      try {
+        const backLink = await f.$('a:has-text("戻る")');
+        if (backLink) {
+          await backLink.click();
+          backClicked = true;
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+    if (!backClicked) {
+      logger.warn('戻るリンク未検出。act_back にフォールバック');
+      await nav.submitForm({ action: 'act_back' });
+    }
+    await this.sleep(3000);
+
+    // k2_2 に戻るまで待機（全1ボタンが存在するフレームを検出）
+    let k2_2MainFrame: Frame | null = null;
+    for (let i = 0; i < 20; i++) {
+      const allF = hamPage.frames();
+      for (const f of allF) {
+        const hasAll1 = await f.evaluate(() =>
+          !!document.querySelector('input[name="act_chooseall"]')
+        ).catch(() => false);
+        if (hasAll1) { k2_2MainFrame = f; break; }
+      }
+      if (k2_2MainFrame) break;
+      await this.sleep(1500);
+    }
+    if (!k2_2MainFrame) {
+      k2_2MainFrame = await nav.getMainFrame();
+    }
+    logger.debug('Step 10.5: k2_2 に戻った');
 
     // === Step 11: k2_2 で「全1」ボタン — 実績フラグ一括設定 ===
-    await this.clickSelectAll1(nav);
+    const all1Btn = await k2_2MainFrame.$('input[name="act_chooseall"]');
+    if (all1Btn) {
+      await all1Btn.click();
+    } else {
+      await this.clickSelectAll1(nav);
+    }
+    await this.sleep(1000);
     logger.debug('Step 11: 全1ボタン実行（実績フラグ一括設定）');
 
     // === Step 11.5: k2_2 で緊急時加算チェック (必要な場合) ===
@@ -434,14 +486,16 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       logger.debug('Step 11.5: 緊急時加算チェック ON');
     }
 
-    // === Step 12: 上書き保存（2回目: 実績確定） ===
-    await nav.submitForm({
-      action: 'act_update',
-      setLockCheck: true,
-      waitForPageId: 'k2_2',
-    });
-    await this.sleep(2000);
-    logger.debug('Step 12: 上書き保存（2回目: 実績確定）');
+    // === Step 12: 上書き保存 ===
+    const saveBtnK2_2 = await k2_2MainFrame.$('input[value="上書き保存"]');
+    if (saveBtnK2_2) {
+      await k2_2MainFrame.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+      await saveBtnK2_2.click();
+    } else {
+      await nav.submitForm({ action: 'act_update', setLockCheck: true });
+    }
+    await this.sleep(3000);
+    logger.debug('Step 12: 上書き保存完了');
 
     // === Step 13: 保存結果検証 ===
     const content = await nav.getFrameContent('k2_2');
