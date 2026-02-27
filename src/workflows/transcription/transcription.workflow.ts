@@ -287,7 +287,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await nav.setSelectValue('starttime0', startParts.hour);
     await nav.setSelectValue('starttime1', startParts.minute);
     await nav.setSelectValue('timetype', timetype);
-    // 終了時間は HAM 自動値のまま（手動修正するとエラーになる。専務確認済み 2026-02-26）
+
+    // timetype の onchange="checkTimeHk604()" を発火して終了時間を自動計算させる
+    const k2_3FrameForChange = await nav.getMainFrame('k2_3');
+    await k2_3FrameForChange.evaluate(() => {
+      const form = document.forms[0];
+      const timeSel = form?.timetype as HTMLSelectElement;
+      if (timeSel) {
+        timeSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    await this.sleep(1000);
 
     // 次へ → k2_3a
     await nav.submitForm({ action: 'act_next', waitForPageId: 'k2_3a', timeout: 30000 });
