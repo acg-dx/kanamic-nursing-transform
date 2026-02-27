@@ -89,6 +89,8 @@ export class SpreadsheetService {
     ];
     if (errorDetail !== undefined) {
       updates.push({ range: `${tab}!${colToLetter(COL_U)}${rowIndex}`, values: [[errorDetail]] });
+    } else if (status === '転記済み') {
+      updates.push({ range: `${tab}!${colToLetter(COL_U)}${rowIndex}`, values: [['']] });
     }
     for (const update of updates) {
       await this.sheets.spreadsheets.values.update({
@@ -144,10 +146,10 @@ export class SpreadsheetService {
   }
 
   async updateDeletionStatus(sheetId: string, rowIndex: number, status: DeletionStatus): Promise<void> {
-    // 削除Sheetのステータス列はN列とする
+    // 削除SheetのステータスはM列（完了ステータス）に書き込む
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
-      range: `削除Sheet!N${rowIndex}`,
+      range: `削除Sheet!M${rowIndex}`,
       valueInputOption: 'RAW',
       requestBody: { values: [[status]] },
     });
@@ -205,9 +207,12 @@ export class SpreadsheetService {
     sheetId: string,
     record: Omit<CorrectionRecord, 'rowIndex'>
   ): Promise<void> {
+    // F列（ステータス）とG列（エラーログ）は書き込まない。
+    // F列にはプルダウン（データ入力規則）が設定されているため、
+    // RAW で値を書き込むとプルダウンが消失する。
     await this.sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: '看護記録修正管理!A:G',
+      range: '看護記録修正管理!A:E',
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: {
@@ -217,8 +222,6 @@ export class SpreadsheetService {
           record.patientName,
           record.correctedAt,
           record.changeDetail,
-          record.status,
-          record.errorLog,
         ]],
       },
     });
@@ -263,5 +266,47 @@ export class SpreadsheetService {
       valueInputOption: 'RAW',
       requestBody: { values: [[status]] },
     });
+  }
+
+  /**
+   * 月次シートの S列（転記フラグ）と U列（エラー詳細）に折返表示を設定。
+   * 文字が見切れないように wrapStrategy: WRAP を適用する。
+   */
+  async formatTranscriptionColumns(sheetId: string): Promise<void> {
+    const tab = getCurrentMonthTab();
+    try {
+      const spreadsheet = await this.sheets.spreadsheets.get({ spreadsheetId: sheetId });
+      const sheet = spreadsheet.data.sheets?.find(s => s.properties?.title === tab);
+      if (!sheet?.properties?.sheetId && sheet?.properties?.sheetId !== 0) {
+        logger.warn(`formatTranscriptionColumns: シート「${tab}」が見つかりません`);
+        return;
+      }
+      const gid = sheet.properties.sheetId;
+
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+          requests: [
+            {
+              repeatCell: {
+                range: { sheetId: gid, startColumnIndex: COL_S, endColumnIndex: COL_S + 1 },
+                cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+                fields: 'userEnteredFormat.wrapStrategy',
+              },
+            },
+            {
+              repeatCell: {
+                range: { sheetId: gid, startColumnIndex: COL_U, endColumnIndex: COL_U + 1 },
+                cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
+                fields: 'userEnteredFormat.wrapStrategy',
+              },
+            },
+          ],
+        },
+      });
+      logger.debug(`formatTranscriptionColumns: S列・U列の折返表示設定完了 (${tab})`);
+    } catch (error) {
+      logger.warn(`formatTranscriptionColumns エラー: ${(error as Error).message}`);
+    }
   }
 }

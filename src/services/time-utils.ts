@@ -3,12 +3,13 @@
  *
  * HAM の timetype 値:
  *   0  = 未設定
- *   20 = 20分未満
- *   21 = 20分（ちょうど）
- *   30 = 30分未満（20分以上）
- *   60 = 1時間未満（30分以上）
- *   90 = 1時間30分未満（1時間以上）
- *   91 = 1時間30分以上
+ *   20 = 20分未満（0~20分）
+ *   30 = 30分未満（21~30分）
+ *   60 = 1時間未満（31~60分）
+ *   90 = 1時間30分未満（61~90分）
+ *   91 = 1時間30分以上（91分~）
+ *
+ * ※ timetype='21'（20分ちょうど）は不使用（専務確認済み 2026-02-26）
  *
  * HAM の starttype/endtype 値:
  *   0 = 指定なし
@@ -37,14 +38,18 @@ export function calcDurationMinutes(startTime: string, endTime: string): number 
 
 /**
  * 所要時間（分）から HAM timetype 値を計算
+ *
+ * 専務確認済み統一ルール (2026-02-26):
+ *   全支援区分（介護・医療・精神医療）共通。
+ *   30分ジャスト → 30分未満、60分ジャスト → 1時間未満。
+ *   終了時間は HAM 自動値のまま手動修正しない。
  */
 export function calcTimetype(durationMinutes: number): string {
-  if (durationMinutes < 20) return '20';       // 20分未満
-  if (durationMinutes === 20) return '21';      // 20分ちょうど
-  if (durationMinutes < 30) return '30';        // 30分未満
-  if (durationMinutes < 60) return '60';        // 1時間未満
-  if (durationMinutes < 90) return '90';        // 1時間30分未満
-  return '91';                                  // 1時間30分以上
+  if (durationMinutes <= 20) return '20';      // 20分未満（0~20分）
+  if (durationMinutes <= 30) return '30';      // 30分未満（21~30分）
+  if (durationMinutes <= 60) return '60';      // 1時間未満（31~60分）
+  if (durationMinutes <= 90) return '90';      // 1時間30分未満（61~90分）
+  return '91';                                 // 1時間30分以上（91分~）
 }
 
 /**

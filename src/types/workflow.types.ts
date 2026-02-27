@@ -18,6 +18,7 @@ export type TranscriptionStatus =
 export type DeletionStatus =
   | ''
   | '削除済み'
+  | '削除不要'
   | 'エラー：システム';
 
 export interface WorkflowContext {

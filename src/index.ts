@@ -123,7 +123,7 @@ async function runDailyJob(): Promise<void> {
         auth.setContext(browser.browserContext);
         try {
           const smarthr = new SmartHRService(smarthrConfig);
-          const staffSync = new StaffSyncService(smarthr, browser, selectorEngine, auth);
+          const staffSync = new StaffSyncService(smarthr, auth);
           const syncResult = await staffSync.syncStaff();
           logger.info(`スタッフ同期: 登録=${syncResult.synced}, スキップ=${syncResult.skipped}, エラー=${syncResult.errors}`);
         } finally {

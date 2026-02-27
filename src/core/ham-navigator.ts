@@ -120,7 +120,17 @@ export class HamNavigator {
    * 6. form.submit()
    */
   async submitForm(options: FormSubmitOptions): Promise<Frame> {
-    const frame = await this.getMainFrame();
+    // フォームが存在するフレームが見つかるまで待機
+    let frame: Frame | null = null;
+    for (let i = 0; i < 20; i++) {
+      const candidate = await this.getMainFrame();
+      const hasForm = await candidate.evaluate(() => !!document.forms[0]).catch(() => false);
+      if (hasForm) { frame = candidate; break; }
+      await this.sleep(500);
+    }
+    if (!frame) {
+      frame = await this.getMainFrame();
+    }
 
     await frame.evaluate((opts) => {
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -182,7 +192,11 @@ export class HamNavigator {
   }
 
   /**
-   * 特定の pageId のフレームが出現するまで待機
+   * 特定の pageId のフレームが出現し、DOM が準備完了するまで待機。
+   *
+   * URL マッチだけでなく document.forms[0] の存在も確認する。
+   * HAM の form 送信は commontarget 経由で mainFrame を更新するため、
+   * URL が先に変わり DOM が後から描画される空窗期がある。
    */
   async waitForMainFrame(pageId: string, timeout = 15000): Promise<Frame> {
     const startTime = Date.now();
@@ -190,7 +204,8 @@ export class HamNavigator {
       try {
         const frame = await this.getMainFrame(pageId);
         if (frame && frame.url().includes(pageId)) {
-          return frame;
+          const domReady = await frame.evaluate(() => !!document.forms[0]).catch(() => false);
+          if (domReady) return frame;
         }
       } catch {
         // フレームがまだ準備できていない
@@ -210,12 +225,54 @@ export class HamNavigator {
       ? await this.getMainFrame(frameOrPageId)
       : frameOrPageId || await this.getMainFrame();
 
-    await frame.evaluate(({ name, val }) => {
-      const form = document.forms[0];
-      const select = form?.[name] as HTMLSelectElement;
-      if (!select) throw new Error(`select[name="${name}"] not found`);
-      select.value = val;
-    }, { name: fieldName, val: value });
+    for (let i = 0; i < 15; i++) {
+      const result = await frame.evaluate(({ name, val }) => {
+        const form = document.forms[0];
+        const select = form?.[name] as HTMLSelectElement;
+        if (!select) return 'no-select';
+
+        // 完全一致
+        for (const opt of Array.from(select.options)) {
+          if (opt.value === val) { select.value = val; return 'ok'; }
+        }
+
+        // ゼロパディング除去で再試行 ("09" → "9")
+        const unpadded = val.replace(/^0+/, '') || '0';
+        for (const opt of Array.from(select.options)) {
+          if (opt.value === unpadded) { select.value = unpadded; return 'ok-unpadded'; }
+        }
+
+        // ゼロパディング追加で再試行 ("9" → "09")
+        const padded = val.padStart(2, '0');
+        for (const opt of Array.from(select.options)) {
+          if (opt.value === padded) { select.value = padded; return 'ok-padded'; }
+        }
+
+        // テキスト部分一致
+        for (const opt of Array.from(select.options)) {
+          if (opt.text.includes(val) || opt.text.includes(unpadded)) {
+            select.value = opt.value; return 'ok-text';
+          }
+        }
+
+        const availableVals = Array.from(select.options).slice(0, 10).map(o => o.value);
+        return `no-match:${JSON.stringify(availableVals)}`;
+      }, { name: fieldName, val: value }).catch(() => 'error');
+
+      if (result.startsWith('ok')) {
+        if (result !== 'ok') {
+          logger.debug(`setSelectValue ${fieldName}=${value} → ${result}`);
+        }
+        return;
+      }
+      if (result === 'no-select') {
+        await this.sleep(500);
+        continue;
+      }
+      logger.warn(`setSelectValue: ${fieldName}="${value}" が選択肢に見つかりません (${result})`);
+      return;
+    }
+    throw new Error(`select[name="${fieldName}"] not found (timeout)`);
   }
 
   /**
@@ -226,12 +283,18 @@ export class HamNavigator {
       ? await this.getMainFrame(frameOrPageId)
       : frameOrPageId || await this.getMainFrame();
 
-    await frame.evaluate(({ name, val }) => {
-      const form = document.forms[0];
-      const input = form?.[name] as HTMLInputElement;
-      if (!input) throw new Error(`input[name="${name}"] not found`);
-      input.value = val;
-    }, { name: fieldName, val: value });
+    for (let i = 0; i < 15; i++) {
+      const ok = await frame.evaluate(({ name, val }) => {
+        const form = document.forms[0];
+        const input = form?.[name] as HTMLInputElement;
+        if (!input) return false;
+        input.value = val;
+        return true;
+      }, { name: fieldName, val: value }).catch(() => false);
+      if (ok) return;
+      await this.sleep(500);
+    }
+    throw new Error(`input[name="${fieldName}"] not found (timeout)`);
   }
 
   /**
@@ -253,29 +316,70 @@ export class HamNavigator {
   /**
    * サービスコード選択（k2_3a用）
    * radio ボタンを選択し、関連する hidden fields を設定
+   *
+   * @param serviceType - 完全一致で検索。見つからなければテキストマッチにフォールバック
+   * @param serviceItem - 完全一致で検索
+   * @param textPattern - テキストマッチ用パターン（部分一致）。空なら値一致のみ
    */
-  async selectServiceCode(serviceType: string, serviceItem: string, frame?: Frame): Promise<void> {
+  async selectServiceCode(serviceType: string, serviceItem: string, frame?: Frame, textPattern?: string): Promise<void> {
     const mainFrame = frame || await this.getMainFrame();
 
-    await mainFrame.evaluate(({ type, item }) => {
+    const result = await mainFrame.evaluate(({ type, item, pattern }) => {
       const form = document.forms[0];
-      const radioValue = `${type}#${item}`;
+      if (!form) throw new Error('form not found in k2_3a');
 
-      // radio ボタン選択
-      const radio = form.querySelector(`input[name="radio"][value="${radioValue}"]`) as HTMLInputElement;
-      if (!radio) throw new Error(`radio[value="${radioValue}"] not found`);
-      radio.checked = true;
+      const radios = Array.from(form.querySelectorAll('input[name="radio"]')) as HTMLInputElement[];
+      if (radios.length === 0) throw new Error('No radio buttons found in k2_3a');
 
-      // hidden fields 設定
-      form.servicetype.value = type;
-      form.serviceitem.value = item;
+      // 方法1: 完全一致（servicetype#serviceitem）
+      const exactValue = `${type}#${item}`;
+      let target = radios.find(r => r.value === exactValue);
+
+      // 方法2: テキストパターンマッチ
+      if (!target && pattern) {
+        for (const r of radios) {
+          if (!r.value) continue;
+          const tr = r.closest('tr');
+          const rowText = tr?.textContent?.trim() || '';
+          if (rowText.includes(pattern)) {
+            target = r;
+            break;
+          }
+        }
+      }
+
+      // 方法3: 最初の有効な radio を選択（フォールバック）
+      if (!target) {
+        target = radios.find(r => r.value && r.value.includes('#'));
+      }
+
+      if (!target) {
+        const available = radios.map(r => {
+          const tr = r.closest('tr');
+          return `${r.value} → ${tr?.textContent?.trim().replace(/\s+/g, ' ').substring(0, 60) || ''}`;
+        });
+        throw new Error(`サービスコード未検出: 候補=${JSON.stringify(available)}`);
+      }
+
+      target.checked = true;
+
+      // radio value から servicetype / serviceitem を分解して hidden fields に設定
+      const parts = target.value.split('#');
+      if (parts.length === 2) {
+        form.servicetype.value = parts[0];
+        form.serviceitem.value = parts[1];
+      }
 
       // servicepoint 取得
-      const obj = document.getElementsByName(radioValue);
+      const obj = document.getElementsByName(target.value);
       if (obj.length > 0) {
         form.servicepoint.value = (obj.item(0) as HTMLInputElement).value;
       }
-    }, { type: serviceType, item: serviceItem });
+
+      return { selected: target.value, method: target.value === exactValue ? 'exact' : 'pattern' };
+    }, { type: serviceType, item: serviceItem, pattern: textPattern || '' });
+
+    logger.debug(`selectServiceCode: ${result.selected} (${result.method})`);
   }
 
   /**
@@ -288,7 +392,6 @@ export class HamNavigator {
     await mainFrame.evaluate((flag) => {
       const form = document.forms[0];
       form.showflag.value = flag;
-      // change_flag ボタンクリックをシミュレート
       /* eslint-disable @typescript-eslint/no-explicit-any */
       const win = window as any;
       win.submited = 0;
@@ -299,7 +402,18 @@ export class HamNavigator {
       form.submit();
     }, showflag);
 
-    await this.sleep(1000);
+    // フォーム送信後の DOM 再描画を待つ（radio ボタンが存在するまで）
+    for (let i = 0; i < 20; i++) {
+      await this.sleep(500);
+      try {
+        const frame = await this.getMainFrame();
+        const hasRadio = await frame.evaluate(() =>
+          !!document.forms[0] && document.querySelectorAll('input[name="radio"]').length > 0
+        ).catch(() => false);
+        if (hasRadio) return;
+      } catch { /* retry */ }
+    }
+    logger.warn('switchInsuranceType: radio ボタンの出現を確認できませんでした');
   }
 
   /**
@@ -341,7 +455,7 @@ export class HamNavigator {
     try {
       const frame = await this.getMainFrame();
       const url = frame.url();
-      const match = url.match(/pageId=(\w+)/);
+      const match = url.match(/pageId=([\w-]+)/);
       return match ? match[1] : null;
     } catch {
       return null;
