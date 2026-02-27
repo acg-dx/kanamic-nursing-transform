@@ -1,0 +1,555 @@
+# 転記RPA 全体仕様書
+
+最終更新: 2026-02-27  
+対象バージョン: コードベース現状（`git log --oneline -1` 参照）
+
+---
+
+## 1. システム概要
+
+### 目的
+Google Sheets に蓄積された訪問看護記録データを、カナミック HAM（Healthcare Administration Manager）に自動転記する RPA システム。
+
+### 実行環境
+- **ランタイム**: Node.js
+- **ブラウザ自動化**: Playwright
+- **スプレッドシート**: Google Sheets API v4（googleapis）
+- **スケジューリング**: node-cron
+
+### 対象事業所
+`src/config/app.config.ts` の `locations` 設定に基づく（荒田・博多/福岡・姶良・谷山 の4拠点）。
+
+### ワークフロー種別
+| ワークフロー | 説明 | 実行タイミング |
+|------------|------|--------------|
+| transcription | 月次シートの看護記録を HAM に転記 | 日次 cron |
+| deletion | 削除シートのレコードを HAM から削除 | 日次 cron |
+| building | 同一建物管理シートの更新 | 別 cron |
+
+### 手動実行
+```bash
+node dist/index.js --workflow=transcription
+node dist/index.js --workflow=deletion
+node dist/index.js --workflow=building
+```
+
+---
+
+## 2-1. ログインフロー
+
+**ソース**: `src/services/kanamick-auth.service.ts`
+
+### フロー概要
+```
+TRITRUS ポータル → JOSSO SSO ログイン → マイページ → goCicHam.jsp → HAM
+```
+
+### 詳細ステップ
+
+**Step 1: JOSSO SSO ログイン**
+- URL: `config.kanamick.url`（TRITRUS ポータル）→ `https://bi.kanamic.net/josso/signon/login.do` にリダイレクト
+- セレクタ:
+  - ユーザー名: `#josso_username`
+  - パスワード: `#josso_password`
+  - ログインボタン: `input.submit-button[type="button"]`
+- `waitForLoadState('networkidle', { timeout: 15000 })`
+- sleep: 2000ms
+
+**Step 2: マイページから HAM リンク検索**
+- `a[href*="goCicHam.jsp"][href*="h={hamOfficeCode}"][href*="k={hamOfficeKey}"]`
+- hamOfficeKey デフォルト: `6`（HAM直接アクセス）
+- hamOfficeCode デフォルト: `400021814`（姶良）
+- フォールバック1: 訪問看護フィルタ適用（`searchServiceTypeText` = `4`）
+- フォールバック2: 事業所名の部分一致（姶良/荒田/谷山/福岡）
+
+**Step 3: goCicHam.jsp クリック → 新タブ**
+- `context.waitForEvent('page', { timeout: 15000 })`
+- `hamPage.waitForURL('**/kanamic/ham/**', { timeout: 30000 })`
+- ダイアログ自動承認: `hamPage.on('dialog', dialog => dialog.accept())`
+- sleep: 2000ms（フレーム構造安定待ち）
+
+**Step 4: venobox ポップアップクローズ**
+- セレクタ: `div.vbox-close`
+- sleep: 500ms
+
+### リトライ設定
+```
+maxAttempts: 2
+baseDelay: 3000ms
+```
+
+### セッション管理（ensureLoggedIn）
+- `isLoggedIn` フラグで管理
+- HAM ページ URL に `login` / `expired` / `about:blank` が含まれる場合は再ログイン
+- ページアクセスエラー時も再ログイン
+
+---
+
+## 2-2. HAMフレーム構造とフォーム送信パターン
+
+**ソース**: `src/core/ham-navigator.ts`
+
+### フレーム構造
+```
+Tab 0: TRITRUS ポータル (https://portal.kanamic.net/tritrus/index/)
+Tab 1: HAM (https://www2.kanamic.net/kanamic/ham/hamfromout.go)
+  └── frame "kanamicmain" → k2_X_right.jsp
+      ├── frame "topFrame" → k2_X_top.jsp (ヘッダー)
+      └── frame "mainFrame" → goPageAction.go?pageId=k2_X (全操作対象)
+```
+
+### getMainFrame() の検索優先順位
+1. `pageId` 指定あり: URL に `pageId={pageId}` を含むフレーム
+2. `goPageAction.go` を含むフレーム
+3. `Action.go` を含むフレーム（`hamfromout` 除く）
+4. 名前 `mainFrame` のフレーム
+5. `kanamicmain` の子フレーム（最後の子）
+
+### 標準フォーム送信パターン（submitForm）
+```javascript
+window.submited = 0;           // 送信ロック解除
+form.doAction.value = action;  // アクション設定
+form.lockCheck.value = '1';    // 修正操作時のみ
+form.target = 'commontarget';
+form.doTarget.value = 'commontarget';
+form.submit();
+```
+
+### submitTargetFormEx（特殊遷移）
+k2_1→k2_2（患者選択）、k2_2→k2_2f（配置ボタン）で使用:
+```javascript
+// onclick="submitTargetFormEx(this.form,'k2_2',careuserid,'8876382')"
+window.submitTargetFormEx(form, pageId, hiddenField, value);
+```
+フォールバック: `form.target = 'mainFrame'` で直接遷移。
+
+### waitForMainFrame のポーリング
+- ポーリング間隔: 300ms
+- デフォルトタイムアウト: 15000ms
+- DOM 準備確認: `document.forms[0]` の存在チェック
+
+### setSelectValue のフォールバック戦略
+1. 完全一致
+2. ゼロパディング除去（`"09"` → `"9"`）
+3. ゼロパディング追加（`"9"` → `"09"`）
+4. テキスト部分一致
+- ポーリング: 最大15回 × 500ms間隔
+
+---
+
+## 2-3. 転記ワークフロー（通常フロー・14ステップ）
+
+**ソース**: `src/workflows/transcription/transcription.workflow.ts` — `processRecord()`
+
+### ページ遷移図
+```
+t1-2 (メインメニュー)
+  → k1_1 (訪問看護業務ガイド)
+    → k2_1 (利用者検索)
+      → k2_2 (月間スケジュール)
+        → k2_3 (スケジュール追加)
+          → k2_3a (サービスコード選択)
+            → k2_3b (確認)
+              → k2_2 (月間スケジュール)
+                → k2_2f (スタッフ配置)
+                  → k2_2 (月間スケジュール)
+                    → t1-2 (メインメニューへ戻る)
+```
+
+### ステップ詳細
+
+| ステップ | 操作 | アクション | 遷移先 | sleep(ms) |
+|---------|------|----------|--------|-----------|
+| Step 1 | メインメニュー → 業務ガイド | `act_k1_1` | k1_1 | - |
+| Step 2 | 業務ガイド → 利用者検索 | `act_k2_1` | k2_1 | - |
+| Step 3 | 年月設定 → 全患者検索 | `act_search` | k2_1 | 1000 |
+| Step 4 | 患者特定 → submitTargetFormEx | `k2_2` | k2_2 | 1000 |
+| Step 4.5 | 修正レコード: 既存スケジュール削除 | `confirmDelete` | k2_2 | 2000 + 2000 |
+| Step 5 | 追加ボタン | `act_addnew` | k2_3 | 1000 |
+| Step 6 | starttype 変更（条件付き） | `onchange` | k2_3 | 3000（変更時のみ） |
+| Step 6 | 時間設定 → 次へ | `act_next` | k2_3a | 1000 |
+| Step 7 | 保険種別切替 | `act_change` | k2_3a | 1500 |
+| Step 7 | サービスコード選択 | radio 選択 | k2_3a | - |
+| Step 7.5 | 資格チェックボックス選択（医療保険のみ） | evaluate | k2_3a | - |
+| Step 8 | 次へ | `act_next` | k2_3b | 500 |
+| Step 8 | 決定 | `act_do` | k2_2 | 1500 |
+| Step 9 | 配置ボタン → submitTargetFormEx | `act_modify` | k2_2f | 1000 |
+| Step 10 | 配置ボタンクリック → 従業員リスト | `act_select` | k2_2f | 2000 |
+| Step 10 | 従業員リスト待機（最大15回） | ポーリング | - | 1000×n |
+| Step 10 | スタッフ選択 → k2_2 | `act_select` | k2_2 | 1000 |
+| Step 10.5 | 上書き保存（1回目: 配置確定） | `act_update` | k2_2 | 2000 |
+| Step 11 | 全1ボタン（実績フラグ一括設定） | `checkAllAndSet1('results')` | k2_2 | 500 |
+| Step 11.5 | 緊急時加算チェック（必要な場合） | `urgentflags` チェック | k2_2 | - |
+| Step 12 | 上書き保存（2回目: 実績確定） | `act_update` | k2_2 | 2000 |
+| Step 13 | 保存結果検証（エラー文字列チェック） | `getFrameContent` | k2_2 | - |
+| Step 14 | Google Sheets S列・V列更新 | Sheets API | - | - |
+| - | メインメニューへ戻る | `act_back` | t1-2 | - |
+
+### syserror.jsp チェックポイント
+Step 4（k2_2 遷移後）、Step 5（k2_3 遷移後）、Step 9（k2_2f 遷移後）で `checkForSyserror()` を実行。
+
+### Step 4.5: 修正レコードの既存スケジュール削除
+- 条件: `transcriptionFlag === '修正あり'`
+- 同一日付 + 同一開始時刻の行を特定
+- `confirmDelete(assignid, record2flag)` を呼び出し
+- `record2flag === '1'`（記録書II存在）の場合はスキップ
+- 削除後に `act_update` で保存（sleep: 2000ms）
+
+### sleep 合計（最小ケース: starttype変更なし、従業員リスト即時表示）
+```
+1000 + 1000 + 1000 + 1500 + 500 + 1500 + 1000 + 2000 + 1000 + 2000 + 500 + 2000 = 16,000ms
+```
+（starttype 変更時: +3000ms = 19,000ms）
+
+---
+
+## 2-4. 転記ワークフロー（I5フロー：介護リハビリ）
+
+**ソース**: `src/workflows/transcription/transcription.workflow.ts` — `processI5Record()`
+
+### 分岐条件
+```typescript
+serviceType1 === '介護' && serviceType2 === 'リハビリ'
+→ codeResult.useI5Page = true
+→ processI5Record() を呼び出し
+```
+
+### フロー概要
+```
+Step 1-4: 通常フローと同じ（メニュー → 検索 → 患者選択 → k2_2）
+Step 5: k2_2 で 訪看I5入力ボタン (act_i5) → k2_7_1
+Step 6: k2_7_1 で時間グループ設定
+Step 7: サービス検索 (act_search) → k2_7_1
+Step 8: 戻る (act_back) → k2_2
+Step 9: 全1ボタン → 上書き保存 → Google Sheets 更新
+```
+
+### k2_7_1 での時間設定フォーム要素
+| フォーム要素 | 内容 |
+|------------|------|
+| `starttimetype` | 時間帯区分（getTimePeriod の結果） |
+| `starthour` | 開始時刻（時） |
+| `startminute` | 開始時刻（分） |
+| `endhour` | 終了時刻（時） |
+| `endminute` | 終了時刻（分） |
+
+### 予防/介護の切替判定
+`PatientMasterService.determineCareType(careLevel)` で判定。  
+予防モードの場合はログ出力のみ（実機検証後に UI 操作を追加予定）。
+
+### sleep 合計（I5フロー）
+```
+1000（患者検索後）+ 1000（k2_2遷移後）+ 1000（k2_7_1遷移後）
++ 1500（サービス検索後）+ 1000（k2_2戻り後）+ 2000（上書き保存後）= 7,500ms
+```
+
+---
+
+## 2-5. サービスコード決定ロジック
+
+**ソース**: `src/services/service-code-resolver.ts`
+
+### 決定要素
+| パラメータ | 説明 | 値 |
+|----------|------|-----|
+| `showflag` | 保険種別切替 | 1=介護, 2=予防, 3=医療/精神医療 |
+| `servicetype` | サービス種類コード | HAM radio value の左側 |
+| `serviceitem` | サービス項目コード | HAM radio value の右側 |
+| `longcareflag` | 介護保険フラグ | 1=介護保険, 0=医療保険 |
+| `pluralnurseflag1` | 複数名訪問加算フラグ | 1=あり, 0=なし |
+| `pluralnurseflag2` | 同行事務員フラグ | 1=あり, 0=なし |
+| `useI5Page` | I5ページ使用フラグ | true=k2_7_1, false=通常フロー |
+| `setUrgentFlag` | 緊急時加算フラグ | true=urgentflags チェック ON |
+| `textPattern` | テキストマッチパターン | radio 行テキスト部分一致フォールバック |
+
+### 全分岐決定表
+
+| serviceType1 | serviceType2 | 同行 | 複数名/事務員 | 緊急 | showflag | servicetype | serviceitem | useI5Page |
+|-------------|-------------|:----:|:------------:|:----:|:--------:|:-----------:|:-----------:|:---------:|
+| 介護 | リハビリ | - | - | - | 1 | - | - | ✓ |
+| 医療 | 緊急 | - | - | ✓ | 3 | 93 | 1001 | - |
+| 医療 | リハビリ | - | ✓ | - | 3 | 93 | 1001 | - |
+| 医療 | リハビリ | - | - | - | 3 | 93 | 1001 | - |
+| 医療 | 通常 | ✓ | - | - | 3 | 93 | 1001 | - |
+| 医療 | 通常 | - | ✓ | - | 3 | 93 | 1001 | - |
+| 医療 | 通常 | - | - | - | 3 | 93 | 1001 | - |
+| 精神医療 | 緊急 | - | - | ✓ | 3 | 93 | 1225 | - |
+| 精神医療 | 通常 | ✓ | - | - | 3 | 93 | 1225 | - |
+| 精神医療 | 通常 | - | ✓ | - | 3 | 93 | 1225 | - |
+| 精神医療 | 通常 | - | - | - | 3 | 93 | 1225 | - |
+| 介護 | 緊急 | - | - | ✓ | 1 | 13 | 1111 | - |
+| 介護 | 通常 | ✓ | - | - | 1 | 13 | 1121 | - |
+| 介護 | 通常 | - | ✓ | - | 1 | 13 | 1114 | - |
+| 介護 | 通常 | - | - | - | 1 | 13 | 1111 | - |
+
+> **注意**: 介護保険の servicetype/serviceitem は実機未検証。textPattern フォールバックで対応。
+
+### textPattern フォールバック
+`servicetype#serviceitem` が HAM の radio value と一致しない場合、`textPattern` で行テキスト部分一致検索。  
+例: `textPattern: '訪問看護基本療養費'`
+
+### 資格チェックボックス選択（医療保険のみ: showflag=3）
+| 資格 | value | 対象 |
+|------|-------|------|
+| 看護師等 | `1` | 通常/緊急（看護師優先） |
+| 准看護師等 | `2` | 通常/緊急（准看護師） |
+| 理学療法士等 | `3` | リハビリのみ |
+
+**医療リハビリの資格制限**: 看護師/准看護師は不可。理学療法士/作業療法士/言語聴覚士のみ。
+
+---
+
+## 2-6. 転記対象判定ロジック
+
+**ソース**: `src/workflows/transcription/transcription.workflow.ts` — `isTranscriptionTarget()`
+
+### 判定フロー（優先順位順）
+
+```
+1. recordLocked = true          → 対象外（実績ロック）
+2. completionStatus = '' or '1' → 対象外（会議決定: 日々チェック保留）
+3. transcriptionFlag = '転記済み' → 対象外（転記完了）
+4. transcriptionFlag = ''        → 対象（未転記）
+5. transcriptionFlag = 'エラー：システム' → 対象（再試行）
+6. transcriptionFlag = 'エラー：マスタ不備' AND masterCorrectionFlag = true → 対象（マスタ修正後）
+7. transcriptionFlag = '修正あり' → 対象（修正レコード再転記）
+8. その他                        → 対象外
+```
+
+### completionStatus の値（M列）
+| 値 | 意味 | 転記対象 |
+|----|------|:-------:|
+| `''` (空白) | 未確認/保留 | ✗ |
+| `'1'` | 日々チェック保留 | ✗ |
+| `'2'` | 日々チェック完了 | ✓ |
+| `'3'` | （値の意味は業務仕様参照） | ✓ |
+| `'4'` | （値の意味は業務仕様参照） | ✓ |
+
+> **会議決定（2026-02-27）**: 「1」と空白ステータスは保留として転記から除外し、「2、3、4」をカナミックへの転記対象とする。
+
+---
+
+## 2-7. エラー分類と処理
+
+**ソース**: `src/workflows/transcription/transcription.workflow.ts` — `classifyError()`, `tryRecoverToMainMenu()`
+
+### エラー分類表
+
+| エラーパターン（メッセージ含む文字列） | S列ステータス | カテゴリ | recoverable | U列エラー詳細 |
+|----------------------------------|-------------|---------|:-----------:|-------------|
+| `患者が見つかりません` / `マスタ不備` | エラー：マスタ不備 | master | ✗ | 利用者がHAMに登録されていません |
+| `スタッフ` + `見つかりません` | エラー：マスタ不備 | master | ✗ | スタッフがHAMに登録されていません |
+| `医療リハビリ資格制限` | エラー：マスタ不備 | master | ✗ | 医療リハビリ：看護師/准看護師は対応不可（理学療法士等のみ） |
+| `サービスコード未検出` | エラー：システム | system | ✓ | サービスコードが見つかりません。HAM設定を確認してください |
+| `syserror` / `E00010` / `一時的に利用できません` | エラー：システム | network | ✓ | HAMシステムが一時的に利用できません。時間をおいて再実行してください |
+| `form not found` / `not found (timeout)` | エラー：システム | system | ✓ | HAM画面の読み込みタイムアウト。再実行してください |
+| `mainFrame` / `フレーム` | エラー：システム | system | ✓ | HAM画面遷移エラー。再実行してください |
+| `timeout` / `Timeout` / `net::` | エラー：システム | network | ✓ | ネットワークタイムアウト。接続を確認して再実行してください |
+| `ログイン` / `expired` / `login` | エラー：システム | network | ✓ | セッション切れ。再ログインして再実行してください |
+| その他 | エラー：システム | system | ✓ | システムエラー: {先頭80文字} |
+
+### エラー後の復帰ロジック（tryRecoverToMainMenu）
+1. syserror ページの「閉じる」ボタン（`input[type="button"], button`）をクリック（sleep: 1000ms）
+2. `act_back` を最大5回繰り返してメインメニューへ（sleep: 1000ms/回）
+3. 失敗時: `ensureLoggedIn()` で再ログイン
+
+---
+
+## 2-8. リトライ戦略
+
+**ソース**: `src/core/retry-manager.ts`
+
+### バックオフ計算式
+```
+delay = min(baseDelay × 2^(attempt-1), maxDelay)
+```
+
+### 各ワークフローのリトライ設定
+
+| ワークフロー | maxAttempts | baseDelay(ms) | maxDelay(ms) | backoffMultiplier |
+|------------|:-----------:|:-------------:|:------------:|:-----------------:|
+| 転記（processRecord） | 2 | 3000 | 15000 | 2 |
+| ログイン（login） | 2 | 3000 | - | - |
+| 削除（processRecord） | 3 | 2000 | 10000 | 2 |
+| デフォルト | 3 | 1000 | 30000 | 2 |
+
+### 実際の待機時間
+
+**転記（maxAttempts=2）**:
+- 1回目失敗後: `min(3000 × 2^0, 15000)` = 3000ms 待機
+- 2回目失敗後: 終了（最大2回）
+
+**削除（maxAttempts=3）**:
+- 1回目失敗後: `min(2000 × 2^0, 10000)` = 2000ms
+- 2回目失敗後: `min(2000 × 2^1, 10000)` = 4000ms
+- 3回目失敗後: 終了
+
+---
+
+## 2-9. 処理ペース・負荷情報
+
+**ソース**: `src/workflows/transcription/transcription.workflow.ts` の全 sleep() 呼び出し
+
+### 通常フロー sleep 一覧
+
+| 場所 | sleep(ms) | 条件 |
+|------|:---------:|------|
+| Step 3: 患者検索後 | 1000 | 常時 |
+| Step 4: k2_2 遷移後 | 1000 | 常時 |
+| Step 4.5: 削除ボタンクリック後 | 2000 | 修正レコードのみ |
+| Step 4.5: 上書き保存後 | 2000 | 修正レコードのみ |
+| Step 5: k2_3 遷移後 | 1000 | 常時 |
+| Step 6: starttype 変更後 | 3000 | starttype 変更時のみ |
+| Step 7: 保険種別切替後 | 1500 | 常時 |
+| Step 8: k2_3b 次へ後 | 500 | 常時 |
+| Step 8: k2_3b 決定後 | 1500 | 常時 |
+| Step 9: k2_2f 遷移後 | 1000 | 常時 |
+| Step 10: 配置ボタン後 | 2000 | 常時 |
+| Step 10: 従業員リスト待機 | 1000×n | 最大15回 |
+| Step 10: スタッフ選択後 | 1000 | 常時 |
+| Step 10.5: 上書き保存1回目後 | 2000 | 常時 |
+| Step 11: 全1ボタン後 | 500 | 常時 |
+| Step 12: 上書き保存2回目後 | 2000 | 常時 |
+
+### 処理時間推定
+
+| ケース | sleep合計 | 推定総処理時間 |
+|-------|:---------:|:------------:|
+| 最小（starttype変更なし、従業員リスト即時） | 16,000ms | 30〜45秒 |
+| 標準（starttype変更あり） | 19,000ms | 35〜50秒 |
+| 修正レコード（既存削除あり） | +4,000ms | 40〜60秒 |
+
+> **注意**: 上記は sleep のみの合計。`waitForMainFrame`（タイムアウト15秒）、Google Sheets API 呼び出し、ネットワーク遅延を含む実際の処理時間はさらに長くなる。
+
+### I5フロー sleep 合計
+```
+1000 + 1000 + 1000 + 1500 + 1000 + 2000 = 7,500ms（最小）
+```
+
+### ページ遷移・フォーム送信回数（通常フロー）
+- ページ遷移: 約8回（t1-2→k1_1→k2_1→k2_2→k2_3→k2_3a→k2_3b→k2_2→k2_2f→k2_2）
+- フォーム送信: 約10回（submitForm + submitTargetFormEx）
+
+---
+
+## 2-10. Google Sheets 操作
+
+**ソース**: `src/services/spreadsheet.service.ts`
+
+### 読み取り範囲
+
+| シート | タブ名 | 範囲 | 列数 |
+|-------|-------|------|:----:|
+| 月次シート | `{YYYY年MM月}` (例: 2026年02月) | `A2:Y` | 25 |
+| 削除シート | `削除Sheet` | `A2:M` | 13 |
+| 修正管理シート | `看護記録修正管理` | `A2:G` | 7 |
+| 建物管理シート | `同一建物管理` | `A2:I` | 9 |
+
+### 書き込み列（月次シート）
+
+| 列 | インデックス | 内容 | 書き込みタイミング |
+|----|:-----------:|------|----------------|
+| S列 | 18 | 転記フラグ（転記済み/エラー：システム/エラー：マスタ不備） | 転記完了時・エラー時 |
+| U列 | 20 | エラー詳細（日本語メッセージ） | エラー時（転記済み時はクリア） |
+| V列 | 21 | データ取得日時（ISO 8601形式） | 転記完了時 |
+
+### 書式設定
+`formatTranscriptionColumns()` — 月次シートの S列・U列に `wrapStrategy: WRAP` を適用（文字折返表示）。
+
+### 月次シートタブ名生成
+```typescript
+`${now.getFullYear()}年${String(now.getMonth() + 1).padStart(2, '0')}月`
+// 例: "2026年02月"
+```
+
+### 注意事項
+- `CorrectionDetector` クラスは `src/index.ts` にインポートされているが、インスタンス化されていない（**デッドコード**）。修正管理シートへの書き込みは本プロジェクトの範囲外。
+- `appendCorrectionRecord()` は A〜E列のみ書き込み（F列のプルダウン保持のため）。
+
+---
+
+## 2-11. 日次ジョブフロー
+
+**ソース**: `src/index.ts`
+
+### 実行順序（runDailyJob）
+
+```
+1. 防重入チェック（isRunning フラグ）
+   └── 実行中の場合: スキップ
+
+2. SmartHR スタッフ同期（SMARTHR_ACCESS_TOKEN 設定時のみ）
+   └── 失敗しても転記は続行
+
+3. 転記ワークフロー（全事業所）
+   └── 失敗しても削除は続行
+
+4. 削除ワークフロー（全事業所）
+
+5. メール通知（NOTIFICATION_EMAIL_ENABLED=true 時のみ）
+```
+
+### cron スケジュール
+```typescript
+cron.schedule(config.scheduling.transcriptionCron, () => runDailyJob());
+cron.schedule(config.scheduling.buildingMgmtCron, () => runWorkflow('building'));
+```
+（実際のスケジュール値は `src/config/app.config.ts` 参照）
+
+### 環境変数
+
+| 変数名 | デフォルト値 | 説明 |
+|-------|------------|------|
+| `KANAMICK_STATION_NAME` | `訪問看護ステーションあおぞら姶良` | 対象事業所名 |
+| `KANAMICK_HAM_OFFICE_KEY` | `6` | goCicHam.jsp の k パラメータ |
+| `KANAMICK_HAM_OFFICE_CODE` | `400021814` | goCicHam.jsp の h パラメータ（姶良） |
+| `DRY_RUN` | `false` | `true` で HAM 操作をスキップ |
+| `NOTIFICATION_EMAIL_ENABLED` | `false` | メール通知の有効化 |
+| `SMTP_HOST` | `smtp.gmail.com` | SMTP サーバー |
+| `SMTP_PORT` | `587` | SMTP ポート |
+| `SMTP_SECURE` | `false` | TLS 使用 |
+| `SMTP_USER` | - | SMTP ユーザー |
+| `SMTP_PASS` | - | SMTP パスワード |
+| `NOTIFICATION_FROM` | - | 送信元メールアドレス |
+| `NOTIFICATION_TO` | - | 送信先メールアドレス（カンマ区切り） |
+| `SMARTHR_ACCESS_TOKEN` | - | SmartHR API トークン（未設定時は同期スキップ） |
+| `SMARTHR_BASE_URL` | `https://acg.smarthr.jp/api/v1` | SmartHR API URL |
+
+---
+
+## 2-12. timetype 計算ルール
+
+**ソース**: `src/services/time-utils.ts`
+
+### calcDurationMinutes（所要時間計算）
+```typescript
+startMin = startHour * 60 + startMinute
+endMin   = endHour   * 60 + endMinute
+// 日跨ぎ対応（例: 23:00 → 01:00）
+if (endMin <= startMin) endMin += 24 * 60
+duration = endMin - startMin
+```
+
+### calcTimetype（HAM timetype 値）
+
+| 所要時間（分） | timetype | HAM表示 |
+|:------------:|:--------:|--------|
+| 0〜20分 | `'20'` | 20分未満 |
+| 21〜30分 | `'30'` | 30分未満 |
+| 31〜60分 | `'60'` | 1時間未満 |
+| 61〜90分 | `'90'` | 1時間30分未満 |
+| 91分以上 | `'91'` | 1時間30分以上 |
+
+> **注意**: `timetype='21'`（20分ちょうど）は不使用（専務確認済み 2026-02-26）
+
+### getTimePeriod（starttype/endtype: 時間帯区分）
+
+| 時刻範囲 | 値 | HAM表示 |
+|---------|:--:|--------|
+| 6:00〜17:59 | `'1'` | 日中 |
+| 18:00〜21:59 | `'2'` | 夜間・早朝 |
+| 22:00〜5:59 | `'3'` | 深夜 |
+
+### 終了時間の扱い
+**終了時間は HAM 自動値のまま手動修正しない**（専務確認済み 2026-02-26）。  
+`timetype` を設定すれば HAM が自動的に終了時間を計算する。
