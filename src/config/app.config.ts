@@ -19,6 +19,23 @@ const SHEET_LOCATIONS = [
   { name: '姶良', sheetId: '12lzQUObLw0ymZdTRPpBWqECRkRimMXO7-m9maWPUt6M' },
 ];
 
+/**
+ * RUN_LOCATIONS 環境変数で処理対象の事業所をフィルタ（カンマ区切り）
+ * 例: RUN_LOCATIONS=姶良        → 姶良のみ
+ *     RUN_LOCATIONS=姶良,谷山   → 姶良と谷山
+ *     未設定                    → 全事業所
+ */
+function getActiveLocations() {
+  const runLocations = process.env.RUN_LOCATIONS;
+  if (!runLocations) return SHEET_LOCATIONS;
+
+  const names = runLocations.split(',').map(s => s.trim()).filter(Boolean);
+  if (names.length === 0) return SHEET_LOCATIONS;
+
+  const filtered = SHEET_LOCATIONS.filter(loc => names.includes(loc.name));
+  return filtered.length > 0 ? filtered : SHEET_LOCATIONS;
+}
+
 /** 同一建物管理用連携スプレッドシートID */
 const BUILDING_MGMT_SHEET_ID = process.env.BUILDING_MGMT_SHEET_ID
   || '18DueDsYPsNmePiYIp9hVpD1rIWWMCyPX5SdWzXOnZBY';
@@ -32,7 +49,7 @@ export function loadConfig(): AppConfig {
     },
     sheets: {
       serviceAccountKeyPath: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || './kangotenki.json',
-      locations: SHEET_LOCATIONS,
+      locations: getActiveLocations(),
       buildingMgmtSheetId: BUILDING_MGMT_SHEET_ID,
     },
     aiHealing: {
