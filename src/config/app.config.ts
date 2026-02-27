@@ -41,7 +41,7 @@ export function loadConfig(): AppConfig {
       maxAttempts: parseInt(process.env.AI_HEALING_MAX_ATTEMPTS || '3', 10),
     },
     scheduling: {
-      transcriptionCron: process.env.TRANSCRIPTION_CRON || '0 4 * * *',
+      transcriptionCron: process.env.TRANSCRIPTION_CRON || '0 7 * * *',
       buildingMgmtCron: process.env.BUILDING_MGMT_CRON || '0 6 3 * *',
     },
     logging: {
