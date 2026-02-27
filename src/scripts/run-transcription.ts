@@ -166,13 +166,7 @@ async function main(): Promise<void> {
     // メール通知
     const notificationConfig: NotificationConfig = {
       enabled: process.env.NOTIFICATION_EMAIL_ENABLED === 'true',
-      smtp: {
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: process.env.SMTP_SECURE === 'true',
-        user: process.env.SMTP_USER || '',
-        pass: process.env.SMTP_PASS || '',
-      },
+      serviceAccountKeyPath: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || './kangotenki.json',
       from: process.env.NOTIFICATION_FROM || '',
       to: (process.env.NOTIFICATION_TO || '').split(',').filter(Boolean),
     };

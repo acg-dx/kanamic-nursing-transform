@@ -2,24 +2,26 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NotificationService } from '../notification.service';
 import type { NotificationConfig, DailyReport } from '../../types/notification.types';
 
-// Mock nodemailer
-vi.mock('nodemailer', () => ({
-  default: {
-    createTransport: vi.fn(() => ({
-      sendMail: vi.fn().mockResolvedValue({ messageId: 'test-id' }),
+// Mock googleapis
+const mockSend = vi.fn().mockResolvedValue({ data: { id: 'test-id' } });
+vi.mock('googleapis', () => ({
+  google: {
+    auth: {
+      GoogleAuth: vi.fn().mockImplementation(function () { return {}; }),
+    },
+    gmail: vi.fn(() => ({
+      users: {
+        messages: {
+          send: mockSend,
+        },
+      },
     })),
   },
 }));
 
 const mockConfig: NotificationConfig = {
   enabled: true,
-  smtp: {
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    user: 'test@example.com',
-    pass: 'test-password',
-  },
+  serviceAccountKeyPath: './kangotenki.json',
   from: 'rpa@example.com',
   to: ['admin@example.com'],
 };
@@ -84,45 +86,43 @@ describe('NotificationService', () => {
     expect(disabledService.isEnabled()).toBe(false);
   });
 
-  it('sendDailyReport sends email with success subject for successful report', async () => {
-    const nodemailer = await import('nodemailer');
-    const mockSendMail = vi.fn().mockResolvedValue({ messageId: 'test' });
-    vi.mocked(nodemailer.default.createTransport).mockReturnValue({ sendMail: mockSendMail } as any);
-
+  it('sendDailyReport sends email via Gmail API for successful report', async () => {
     await service.sendDailyReport(mockSuccessReport);
 
-    expect(mockSendMail).toHaveBeenCalledWith(
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend).toHaveBeenCalledWith(
       expect.objectContaining({
-        subject: expect.stringContaining('[カナミックRPA] 転記処理結果'),
+        userId: 'me',
+        requestBody: expect.objectContaining({
+          raw: expect.any(String),
+        }),
       })
     );
   });
 
-  it('sendDailyReport sends email with error subject for failed report', async () => {
-    const nodemailer = await import('nodemailer');
-    const mockSendMail = vi.fn().mockResolvedValue({ messageId: 'test' });
-    vi.mocked(nodemailer.default.createTransport).mockReturnValue({ sendMail: mockSendMail } as any);
-
+  it('sendDailyReport sends email via Gmail API for failed report', async () => {
     await service.sendDailyReport(mockErrorReport);
 
-    expect(mockSendMail).toHaveBeenCalledWith(
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend).toHaveBeenCalledWith(
       expect.objectContaining({
-        subject: expect.stringContaining('⚠️ エラー発生'),
+        userId: 'me',
+        requestBody: expect.objectContaining({
+          raw: expect.any(String),
+        }),
       })
     );
   });
 
   it('sendDailyReport does not send email when disabled', async () => {
-    const nodemailer = await import('nodemailer');
     const disabledService = new NotificationService({ ...mockConfig, enabled: false });
 
     await disabledService.sendDailyReport(mockSuccessReport);
 
-    expect(nodemailer.default.createTransport).not.toHaveBeenCalled();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   it('sendDailyReport does not send email when no records processed', async () => {
-    const nodemailer = await import('nodemailer');
     const emptyReport: DailyReport = {
       ...mockSuccessReport,
       totalProcessed: 0,
@@ -131,14 +131,11 @@ describe('NotificationService', () => {
 
     await service.sendDailyReport(emptyReport);
 
-    expect(nodemailer.default.createTransport).not.toHaveBeenCalled();
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
-  it('sendDailyReport does not throw when SMTP fails', async () => {
-    const nodemailer = await import('nodemailer');
-    vi.mocked(nodemailer.default.createTransport).mockReturnValue({
-      sendMail: vi.fn().mockRejectedValue(new Error('SMTP connection failed')),
-    } as any);
+  it('sendDailyReport does not throw when Gmail API fails', async () => {
+    mockSend.mockRejectedValueOnce(new Error('Gmail API connection failed'));
 
     // Should not throw
     await expect(service.sendDailyReport(mockSuccessReport)).resolves.not.toThrow();

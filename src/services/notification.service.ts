@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
 import { logger } from '../core/logger';
 import type { NotificationConfig, DailyReport, WorkflowReport } from '../types/notification.types';
 
@@ -31,28 +31,60 @@ export class NotificationService {
     const html = this.buildEmailHtml(report);
 
     try {
-      const transporter = nodemailer.createTransport({
-        host: this.config.smtp.host,
-        port: this.config.smtp.port,
-        secure: this.config.smtp.secure,
-        auth: {
-          user: this.config.smtp.user,
-          pass: this.config.smtp.pass,
+      const auth = new google.auth.GoogleAuth({
+        keyFile: this.config.serviceAccountKeyPath,
+        scopes: ['https://www.googleapis.com/auth/gmail.send'],
+        clientOptions: {
+          subject: this.config.from, // ドメイン全体の委任で送信元ユーザーを指定
         },
       });
 
-      await transporter.sendMail({
-        from: this.config.from,
-        to: this.config.to.join(', '),
-        subject,
-        html,
+      const gmail = google.gmail({ version: 'v1', auth });
+
+      const toAddresses = this.config.to.join(', ');
+      const rawMessage = this.buildRawEmail(this.config.from, toAddresses, subject, html);
+
+      await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: {
+          raw: rawMessage,
+        },
       });
 
       logger.info(`通知メール送信完了: ${subject}`);
     } catch (error) {
-      // SMTP失敗はログのみ、例外は投げない
+      // Gmail API 失敗はログのみ、例外は投げない
       logger.error(`通知メール送信失敗: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * RFC 2822 形式のメールを base64url エンコードして返す
+   */
+  private buildRawEmail(from: string, to: string, subject: string, htmlBody: string): string {
+    const boundary = `boundary_${Date.now()}`;
+    const lines = [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(htmlBody).toString('base64'),
+      '',
+      `--${boundary}--`,
+    ];
+    const raw = lines.join('\r\n');
+    // Gmail API は base64url エンコードを要求
+    return Buffer.from(raw)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
   }
 
   private buildEmailHtml(report: DailyReport): string {

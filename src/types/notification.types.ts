@@ -1,13 +1,10 @@
 export interface NotificationConfig {
   enabled: boolean;
-  smtp: {
-    host: string;
-    port: number;
-    secure: boolean;
-    user: string;
-    pass: string;
-  };
+  /** Google Service Account キーファイルパス */
+  serviceAccountKeyPath: string;
+  /** 送信元メールアドレス（Service Account に委任されたユーザー） */
   from: string;
+  /** 送信先メールアドレス */
   to: string[];
 }
 
