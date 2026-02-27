@@ -553,3 +553,287 @@ duration = endMin - startMin
 ### 終了時間の扱い
 **終了時間は HAM 自動値のまま手動修正しない**（専務確認済み 2026-02-26）。  
 `timetype` を設定すれば HAM が自動的に終了時間を計算する。
+
+---
+
+## 2-13. 削除ワークフロー
+
+**ソース**: `src/workflows/deletion/deletion.workflow.ts`
+
+### 概要
+削除Sheet に登録されたレコードに基づき、HAM 上の該当スケジュールを削除する。転記ワークフロー完了後に実行される。
+
+### 削除Sheet 列構成
+
+| 列 | インデックス | 内容 |
+|----|:-----------:|------|
+| A | 0 | ID |
+| B | 1 | タイムスタンプ |
+| C | 2 | 更新日時 |
+| D | 3 | 従業員番号 |
+| E | 4 | 記録者 |
+| F | 5 | あおぞらID |
+| G | 6 | 利用者 |
+| H | 7 | 日付 |
+| I | 8 | 開始時刻 |
+| J | 9 | 終了時刻 |
+| K | 10 | 支援区分1 |
+| L | 11 | 支援区分2 |
+| M | 12 | 完了ステータス（RPA書き込み先） |
+
+### M列（完了ステータス）の値
+
+| 値 | 意味 | 次回実行時 |
+|----|------|-----------|
+| `''`（空白） | 未処理 | 削除対象 |
+| `'削除済み'` | HAM から削除完了 | スキップ |
+| `'削除不要'` | HAM に該当スケジュールなし | スキップ |
+| `'エラー：システム'` | システムエラー | リトライ対象 |
+
+### 対象レコード判定
+```typescript
+records.filter(r =>
+  r.recordId &&
+  !r.completionStatus.includes('削除済み') &&
+  !r.completionStatus.includes('削除不要')
+);
+```
+
+### ページ遷移図
+```
+t1-2 (メインメニュー)
+  → k1_1 (訪問看護業務ガイド)
+    → k2_1 (利用者検索)
+      → k2_2 (月間スケジュール)
+        → [削除ボタンクリック + 上書き保存]
+          → t1-2 (メインメニューへ戻る)
+```
+
+### ステップ詳細（processRecord）
+
+| ステップ | 操作 | アクション | 遷移先 | sleep(ms) |
+|---------|------|----------|--------|:---------:|
+| Step 1 | メインメニュー → 業務ガイド → 利用者検索 | `act_k1_1` → `act_k2_1` | k2_1 | - |
+| Step 2 | 年月設定 → 全患者検索 | `setSelectValue('searchdate')` → `act_search` | k2_1 | 1000 |
+| Step 3 | 患者特定 → 月間スケジュール | `submitTargetFormEx` → `waitForMainFrame('k2_2')` | k2_2 | 1000 |
+| Step 3.5 | syserror チェック | `checkForSyserror()` | - | - |
+| Step 4 | 対象スケジュール行を特定 → 削除ボタンクリック | `deleteSchedule()` | k2_2 | 2000 |
+| Step 4（不一致時） | HAM に該当なし → 削除不要 | `updateDeletionStatus('削除不要')` | t1-2 | - |
+| Step 5 | 上書き保存 | `act_update` (setLockCheck: true) | k2_2 | 2000 |
+| Step 6 | Google Sheets M列更新 | `updateDeletionStatus('削除済み')` | - | - |
+| - | メインメニューへ戻る | `navigateToMainMenu()` | t1-2 | - |
+
+### deleteSchedule の詳細
+
+**行特定ロジック**:
+1. `visitDateHam` から日数を抽出 → `dayDisplay = "${dayNum}日"`
+2. k2_2 の全 `<tr>` を走査し、`rowText` に `dayDisplay` と `startTime` の両方を含む行を検索
+3. 行内の `input[name="act_delete"][value="削除"]` ボタンの `onclick` 属性から `assignid` と `record2flag` を正規表現で抽出
+
+**record2flag チェック**:
+- `record2flag === '1'` → 記録書IIが存在するため削除不可（Error をスロー）
+- `record2flag !== '1'` → 削除実行
+
+**削除ボタンクリック**:
+1. Playwright native click: `frame.$('input[name="act_delete"][onclick*="confirmDelete(\'${assignid}\'"]')` → `click()`
+2. フォールバック: `frame.evaluate()` で `window.confirmDelete(assignid, '0')` を直接呼び出し
+3. いずれの場合も事前に `window.submited = 0` で送信ロックを解除
+
+### findPatientId（患者ID検索）
+
+転記ワークフローと同一ロジック:
+1. `input[name="act_result"][value="決定"]` ボタンの親 `<tr>` のテキストで患者名マッチ → `onclick` から `careuserid` 抽出
+2. フォールバック: `document.body.innerHTML` を `<tr` で分割し、行テキストで部分一致検索
+3. 患者名は `normalize()` で全角/半角スペース・`&nbsp;` を除去して比較
+
+### エラー処理（tryRecoverToMainMenu）
+1. syserror ページの「閉じる」ボタンをクリック（sleep: 1000ms）
+2. `act_back` を最大5回繰り返してメインメニュー（`t1-2`）へ復帰（sleep: 1000ms/回）
+3. 復帰失敗時: `ensureLoggedIn()` で再ログイン
+
+### リトライ設定
+```
+maxAttempts: 3
+baseDelay: 2000ms
+maxDelay: 10000ms
+backoffMultiplier: 2
+```
+
+### sleep 合計（正常ケース）
+```
+1000（患者検索後）+ 1000（k2_2遷移後）+ 2000（削除ボタン後）+ 2000（上書き保存後）= 6,000ms
+```
+
+---
+
+## 2-14. AI セレクタ自愈機能
+
+**ソース**: `src/core/ai-healing-service.ts`, `src/core/selector-engine.ts`
+
+### 概要
+HAM のページ構造が変更され CSS セレクタが失効した場合に、OpenAI GPT-4o を使って自動的に新しいセレクタを推定・検証・永続化する機能。
+
+### セレクタ解決優先順位（SelectorEngine.resolve）
+
+```
+1. aiHealed（AI修復済みセレクタ）  → ページ上で要素が見つかれば使用
+2. primary（プライマリセレクタ）    → 通常はこれが使われる
+3. fallbacks（フォールバック配列）  → primary 失敗時に順次試行
+4. AI自愈（healSelector）          → 全て失敗した場合のみ発動
+```
+
+### AI自愈処理フロー
+
+```
+セレクタ解決失敗
+  │
+  ├── 1. スクリーンショット取得 → base64 エンコード
+  ├── 2. ページ HTML 取得（先頭 10,000 文字）
+  ├── 3. OpenAI GPT-4o に送信（画像 + HTML + プロンプト）
+  │       └── レスポンス: { selector, confidence, reasoning }
+  ├── 4. confidence >= 0.5 かチェック
+  ├── 5. 実際にページ上で要素検証（page.$(selector)）
+  ├── 6. 検証成功 → selectors.json に永続化
+  │       ├── config.aiHealed = selector
+  │       ├── config.lastHealed = timestamp
+  │       └── config.confidence = confidence
+  └── 7. 次回以降は aiHealed が最優先で使用される
+```
+
+### セレクタ定義ファイル
+- パス: `src/config/selectors/{workflowName}.selectors.json`
+- 構造:
+```json
+{
+  "version": "1.0",
+  "workflow": "transcription",
+  "lastUpdated": "2026-02-27T...",
+  "selectors": {
+    "selectorId": {
+      "id": "selectorId",
+      "description": "説明",
+      "primary": "#main-selector",
+      "fallbacks": [".fallback-1", ".fallback-2"],
+      "context": "このセレクタの用途説明",
+      "aiHealed": null,
+      "lastHealed": null,
+      "confidence": null
+    }
+  }
+}
+```
+
+### 安全性チェック（isValidCSSSelector）
+- 空文字・空白のみ → 拒否
+- `<`, `>`, `javascript:` を含む → 拒否（スクリプトインジェクション防止）
+- 500文字超 → 拒否
+
+### PHI（個人健康情報）保護
+スクリーンショットは `finally` ブロックで即削除。API 呼び出しの成否に関わらず、ローカルに画像が残らない。
+
+### 環境変数
+
+| 変数名 | デフォルト値 | 説明 |
+|-------|------------|------|
+| `OPENAI_API_KEY` | （必須） | OpenAI API キー |
+| `AI_HEALING_MODEL` | `gpt-4o` | 使用モデル |
+| `AI_HEALING_MAX_ATTEMPTS` | `3` | 最大試行回数 |
+| `SCREENSHOT_DIR` | `./screenshots` | スクリーンショット一時保存先 |
+
+### コスト
+GPT-4o: $2.50/M input, $10/M output。通常運用ではセレクタ失効時のみ発動するため、コストは極めて低い（月数回程度の想定）。
+
+---
+
+## 2-15. 全体処理フロー
+
+**ソース**: `src/index.ts`
+
+### システム構成図
+
+```
+Cloud Run Job トリガー (日本時間 13:00)
+  │
+  ├── 1. SmartHR スタッフ同期（オプション: SMARTHR_ACCESS_TOKEN 設定時のみ）
+  │     └── 失敗しても後続処理は続行
+  │
+  ├── 2. 転記ワークフロー
+  │     ├── ブラウザ起動 → TRITRUS ログイン → HAM
+  │     ├── 各事業所の月次シートを処理
+  │     │     └── 各レコード: 患者検索 → スケジュール追加 → 保存 → S列更新
+  │     └── ブラウザ終了
+  │
+  ├── 3. 削除ワークフロー
+  │     ├── ブラウザ起動 → TRITRUS ログイン → HAM
+  │     ├── 各事業所の削除シートを処理
+  │     │     └── 各レコード: 患者検索 → スケジュール削除 → 保存 → M列更新
+  │     └── ブラウザ終了
+  │
+  └── 4. メール通知
+        ├── 全成功: [カナミックRPA] 転記処理結果 {date}
+        └── エラーあり: [カナミックRPA] ⚠️ エラー発生 {date} + エラー詳細テーブル
+```
+
+### デプロイ構成
+- **実行環境**: GCP Cloud Run Job
+- **スケジューリング**: Cloud Scheduler（日本時間 13:00 トリガー）
+- **コード内 cron**: `node-cron` はローカル開発用のフォールバック（本番では使用しない）
+
+### 実行モード
+
+| モード | コマンド | 動作 |
+|-------|---------|------|
+| 日次ジョブ | `node dist/index.js`（引数なし） | `runDailyJob()`: 転記→削除→通知 |
+| 単体実行 | `node dist/index.js --workflow=transcription` | 転記のみ |
+| 単体実行 | `node dist/index.js --workflow=deletion` | 削除のみ |
+| 単体実行 | `node dist/index.js --workflow=building` | 同一建物管理のみ |
+| ドライラン | `DRY_RUN=true node dist/index.js` | HAM 操作をスキップ（ログのみ） |
+
+### 防重入制御
+`isRunning` フラグで二重実行を防止。前回の処理が完了していない場合はスキップ。
+
+### メール通知
+
+**ソース**: `src/services/notification.service.ts`
+
+| 条件 | 件名 | 内容 |
+|------|------|------|
+| 全成功 | `[カナミックRPA] 転記処理結果 {date}` | 処理結果テーブル（ワークフロー×事業所） |
+| エラーあり | `[カナミックRPA] ⚠️ エラー発生 {date}` | 処理結果テーブル + エラー詳細テーブル |
+| 処理件数0 かつ エラー0 | （送信しない） | - |
+| SMTP送信失敗 | （ログのみ） | 例外は投げない（後続処理に影響しない） |
+
+**HTML メール構成**:
+- 総合結果（✅ 正常完了 / ❌ エラーあり）
+- 処理件数・エラー件数
+- 詳細テーブル: ワークフロー名、事業所名、結果、処理件数、エラー件数、処理時間
+- エラー詳細テーブル（エラーがある場合のみ）: レコードID、カテゴリ、エラー内容
+
+### 全環境変数一覧
+
+| 変数名 | デフォルト値 | 必須 | 説明 |
+|-------|------------|:----:|------|
+| `KANAMICK_URL` | - | ✓ | TRITRUS ポータル URL |
+| `KANAMICK_USERNAME` | - | ✓ | ログインユーザー名 |
+| `KANAMICK_PASSWORD` | - | ✓ | ログインパスワード |
+| `KANAMICK_STATION_NAME` | `訪問看護ステーションあおぞら姶良` | - | 対象事業所名 |
+| `KANAMICK_HAM_OFFICE_KEY` | `6` | - | goCicHam.jsp の k パラメータ |
+| `KANAMICK_HAM_OFFICE_CODE` | `400021814` | - | goCicHam.jsp の h パラメータ（姶良） |
+| `GOOGLE_SERVICE_ACCOUNT_KEY_PATH` | `./kangotenki.json` | - | Google サービスアカウントキー |
+| `OPENAI_API_KEY` | - | ✓ | OpenAI API キー（AI自愈用） |
+| `AI_HEALING_MODEL` | `gpt-4o` | - | AI自愈モデル |
+| `AI_HEALING_MAX_ATTEMPTS` | `3` | - | AI自愈最大試行回数 |
+| `DRY_RUN` | `false` | - | `true` で HAM 操作をスキップ |
+| `NOTIFICATION_EMAIL_ENABLED` | `false` | - | メール通知の有効化 |
+| `SMTP_HOST` | `smtp.gmail.com` | - | SMTP サーバー |
+| `SMTP_PORT` | `587` | - | SMTP ポート |
+| `SMTP_SECURE` | `false` | - | TLS 使用 |
+| `SMTP_USER` | - | - | SMTP ユーザー |
+| `SMTP_PASS` | - | - | SMTP パスワード |
+| `NOTIFICATION_FROM` | - | - | 送信元メールアドレス |
+| `NOTIFICATION_TO` | - | - | 送信先メールアドレス（カンマ区切り） |
+| `SMARTHR_ACCESS_TOKEN` | - | - | SmartHR API トークン（未設定時は同期スキップ） |
+| `SMARTHR_BASE_URL` | `https://acg.smarthr.jp/api/v1` | - | SmartHR API URL |
+| `LOG_LEVEL` | `info` | - | ログレベル |
+| `LOG_DIR` | `./logs` | - | ログ出力先 |
+| `SCREENSHOT_DIR` | `./screenshots` | - | スクリーンショット一時保存先 |
