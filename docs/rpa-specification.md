@@ -19,6 +19,11 @@ Google Sheets に蓄積された訪問看護記録データを、カナミック
 ### 対象事業所
 `src/config/app.config.ts` の `locations` 設定に基づく（荒田・博多/福岡・姶良・谷山 の4拠点）。
 
+環境変数 `RUN_LOCATIONS` で処理対象をフィルタ可能:
+- 未設定: 全4事業所を処理
+- `RUN_LOCATIONS=姶良`: 姶良のみ処理
+- `RUN_LOCATIONS=姶良,谷山`: 姶良と谷山のみ処理
+
 ### ワークフロー種別
 | ワークフロー | 説明 | 実行タイミング |
 |------------|------|--------------|
@@ -505,13 +510,9 @@ cron.schedule(config.scheduling.buildingMgmtCron, () => runWorkflow('building'))
 | `KANAMICK_HAM_OFFICE_CODE` | `400021814` | goCicHam.jsp の h パラメータ（姶良） |
 | `DRY_RUN` | `false` | `true` で HAM 操作をスキップ |
 | `NOTIFICATION_EMAIL_ENABLED` | `false` | メール通知の有効化 |
-| `SMTP_HOST` | `smtp.gmail.com` | SMTP サーバー |
-| `SMTP_PORT` | `587` | SMTP ポート |
-| `SMTP_SECURE` | `false` | TLS 使用 |
-| `SMTP_USER` | - | SMTP ユーザー |
-| `SMTP_PASS` | - | SMTP パスワード |
-| `NOTIFICATION_FROM` | - | 送信元メールアドレス |
+| `NOTIFICATION_FROM` | - | 送信元メールアドレス（Service Account に委任されたユーザー） |
 | `NOTIFICATION_TO` | - | 送信先メールアドレス（カンマ区切り） |
+| `RUN_LOCATIONS` | （全事業所） | 処理対象の事業所名（カンマ区切り、例: `姶良` / `姶良,谷山`） |
 | `SMARTHR_ACCESS_TOKEN` | - | SmartHR API トークン（未設定時は同期スキップ） |
 | `SMARTHR_BASE_URL` | `https://acg.smarthr.jp/api/v1` | SmartHR API URL |
 
@@ -796,12 +797,25 @@ Cloud Run Job トリガー (日本時間 13:00)
 
 **ソース**: `src/services/notification.service.ts`
 
+**送信方式**: Google Gmail API（Service Account + ドメイン全体の委任）
+- Service Account キーファイル: `GOOGLE_SERVICE_ACCOUNT_KEY_PATH`（デフォルト: `./kangotenki.json`）
+- 送信元: `NOTIFICATION_FROM`（Service Account に委任されたユーザーのメールアドレス）
+- 送信先: `NOTIFICATION_TO`（カンマ区切り、例: `dxgroup@aozora-cg.com`）
+- RFC 2822 形式のメールを base64url エンコードして `gmail.users.messages.send` で送信
+
+**Google Workspace 管理者設定（必須）**:
+1. GCP Console で Gmail API を有効化
+2. Service Account の「ドメイン全体の委任」を有効化
+3. Google Admin Console → セキュリティ → API の制御 → ドメイン全体の委任
+   - Client ID: Service Account の Client ID
+   - スコープ: `https://www.googleapis.com/auth/gmail.send`
+
 | 条件 | 件名 | 内容 |
 |------|------|------|
 | 全成功 | `[カナミックRPA] 転記処理結果 {date}` | 処理結果テーブル（ワークフロー×事業所） |
 | エラーあり | `[カナミックRPA] ⚠️ エラー発生 {date}` | 処理結果テーブル + エラー詳細テーブル |
 | 処理件数0 かつ エラー0 | （送信しない） | - |
-| SMTP送信失敗 | （ログのみ） | 例外は投げない（後続処理に影響しない） |
+| Gmail API 送信失敗 | （ログのみ） | 例外は投げない（後続処理に影響しない） |
 
 **HTML メール構成**:
 - 総合結果（✅ 正常完了 / ❌ エラーあり）
@@ -825,13 +839,9 @@ Cloud Run Job トリガー (日本時間 13:00)
 | `AI_HEALING_MAX_ATTEMPTS` | `3` | - | AI自愈最大試行回数 |
 | `DRY_RUN` | `false` | - | `true` で HAM 操作をスキップ |
 | `NOTIFICATION_EMAIL_ENABLED` | `false` | - | メール通知の有効化 |
-| `SMTP_HOST` | `smtp.gmail.com` | - | SMTP サーバー |
-| `SMTP_PORT` | `587` | - | SMTP ポート |
-| `SMTP_SECURE` | `false` | - | TLS 使用 |
-| `SMTP_USER` | - | - | SMTP ユーザー |
-| `SMTP_PASS` | - | - | SMTP パスワード |
-| `NOTIFICATION_FROM` | - | - | 送信元メールアドレス |
+| `NOTIFICATION_FROM` | - | - | 送信元メールアドレス（Service Account に委任されたユーザー） |
 | `NOTIFICATION_TO` | - | - | 送信先メールアドレス（カンマ区切り） |
+| `RUN_LOCATIONS` | （全事業所） | - | 処理対象の事業所名（カンマ区切り、例: `姶良` / `姶良,谷山`） |
 | `SMARTHR_ACCESS_TOKEN` | - | - | SmartHR API トークン（未設定時は同期スキップ） |
 | `SMARTHR_BASE_URL` | `https://acg.smarthr.jp/api/v1` | - | SmartHR API URL |
 | `LOG_LEVEL` | `info` | - | ログレベル |
