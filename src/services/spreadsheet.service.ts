@@ -34,8 +34,8 @@ export class SpreadsheetService {
     this.sheets = google.sheets({ version: 'v4', auth });
   }
 
-  async getTranscriptionRecords(sheetId: string, tab?: string): Promise<TranscriptionRecord[]> {
-    tab = tab || getCurrentMonthTab();
+  async getTranscriptionRecords(sheetId: string): Promise<TranscriptionRecord[]> {
+    const tab = getCurrentMonthTab();
     const range = `${tab}!A2:Y`;
     try {
       const response = await this.sheets.spreadsheets.values.get({
@@ -81,10 +81,9 @@ export class SpreadsheetService {
     sheetId: string,
     rowIndex: number,
     status: TranscriptionStatus,
-    errorDetail?: string,
-    tab?: string,
+    errorDetail?: string
   ): Promise<void> {
-    tab = tab || getCurrentMonthTab();
+    const tab = getCurrentMonthTab();
     const updates: Array<{ range: string; values: string[][] }> = [
       { range: `${tab}!${colToLetter(COL_S)}${rowIndex}`, values: [[status]] },
     ];
@@ -104,8 +103,8 @@ export class SpreadsheetService {
     logger.debug(`転記ステータス更新: row=${rowIndex}, status=${status}`);
   }
 
-  async writeDataFetchedAt(sheetId: string, rowIndex: number, timestamp: string, tab?: string): Promise<void> {
-    tab = tab || getCurrentMonthTab();
+  async writeDataFetchedAt(sheetId: string, rowIndex: number, timestamp: string): Promise<void> {
+    const tab = getCurrentMonthTab();
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
       range: `${tab}!${colToLetter(COL_V)}${rowIndex}`,
@@ -215,7 +214,7 @@ export class SpreadsheetService {
       spreadsheetId: sheetId,
       range: '看護記録修正管理!A:E',
       valueInputOption: 'RAW',
-      insertDataOption: 'OVERWRITE',
+      insertDataOption: 'INSERT_ROWS',
       requestBody: {
         values: [[
           record.correctionId,
@@ -273,8 +272,8 @@ export class SpreadsheetService {
    * 月次シートの S列（転記フラグ）と U列（エラー詳細）に折返表示を設定。
    * 文字が見切れないように wrapStrategy: WRAP を適用する。
    */
-  async formatTranscriptionColumns(sheetId: string, tab?: string): Promise<void> {
-    tab = tab || getCurrentMonthTab();
+  async formatTranscriptionColumns(sheetId: string): Promise<void> {
+    const tab = getCurrentMonthTab();
     try {
       const spreadsheet = await this.sheets.spreadsheets.get({ spreadsheetId: sheetId });
       const sheet = spreadsheet.data.sheets?.find(s => s.properties?.title === tab);
