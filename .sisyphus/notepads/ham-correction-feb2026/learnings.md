@@ -107,3 +107,105 @@ Fix: select searchKbn radio → click `<input type="button" value="検索">` →
 - `npx tsc --noEmit` passes with zero errors
 - Evidence saved to `.sisyphus/evidence/A2-A3-tsc.txt`
 
+
+## 2026-03-05 A6 — Deletion workflow month-sheet cleanup
+
+### Changes Made
+- `spreadsheet.service.ts`: Added `deleteRowByRecordId(sheetId, tabName, recordId)` public method
+  - Uses `batchUpdate` + `deleteDimension` to delete rows by record ID (column A match)
+  - Deletes bottom-to-top when multiple rows match (prevents index shifting)
+  - Returns `true` if ≥1 row deleted, `false` if tab not found or no match
+- `deletion.workflow.ts`: Added Step 7 after `updateDeletionStatus('削除済み')`
+  - Calls `deleteRowByRecordId()` on the month tab derived from `record.visitDate`
+  - Helper `visitDateToMonthTab()` converts `YYYY-MM-DD`/`YYYY/MM/DD` → `YYYY年MM月`
+  - Only runs on the '削除済み' path, not '削除不要'
+- `src/scripts/cleanup-deleted-records.ts`: Retroactive cleanup script
+  - Reads 削除 tab, finds all '削除済み' records, deletes month sheet rows
+  - Idempotent (safe to run multiple times)
+  - Supports `RUN_LOCATIONS=姶良` env var for filtering
+
+### Key Patterns
+- `gid = sheet?.properties?.sheetId` — use `gid == null` check (handles `0` correctly)
+- `dimension: 'ROWS' as const` — required for TypeScript to accept the string literal
+- tsc: `npx tsc --noEmit` → EXIT_CODE=0 (no errors)
+
+## 2026-03-05 Wave 1 完了サマリ
+
+### 完了タスク (全10件)
+- ✅ A1: selectQualificationInFrame() を searchKbn ラジオ + 検索ボタンクリックに書き換え
+  - k2_3a フロー順序変更: switchInsuranceType → selectQualificationCheckbox → selectServiceCode
+  - commit: 4a313be
+- ✅ A2+A3: record2flag throw + retry duplicate guard (commit: 0d04759)
+- ✅ A4+A5: 超減算フィルタ + SmartHR資格検出 (commit: 34119d6)
+- ✅ A6: 削除→月次シート行削除 + cleanup-deleted-records.ts (commit: 98a3d2e)
+- ✅ C1: 加算対象の理由 列(S=18)挿入 + 列インデックス更新 (commit: 66d94e4)
+- ✅ C2: extractPlainName() 追加 + transcription.workflow.ts 4箇所適用 (commit: 4a313be)
+- ✅ C3: add-sheet-editor.ts 作成 (commit: 66d94e4)
+- ✅ D1: qualification-correction.service.ts + run-qualification-correction.ts (commit: b24cd64)
+
+### 重要な実装詳細
+- selectQualificationInFrame: `input[name="searchKbn"]` radio → `input[value="検索"]` click → 2秒待機
+- extractPlainName: 明示的プレフィックスリスト使用（汎用ダッシュ分割は不使用）
+- 列定数: COL_SURCHARGE_REASON=COL_S(18), COL_TRANSCRIPTION_FLAG=COL_T(19), COL_ERROR_DETAIL=COL_V(21), COL_DATA_FETCHED_AT=COL_W(22)
+- tsc: ✅ エラーゼロ / vitest: ✅ 39/39 通過
+
+### Wave 2 開始条件
+- B0: シート現状確認（転記フラグ pending 件数 + 削除 pending 件数）
+- B1: HAM 不要記録4件削除（B0 完了後）
+- B2: 漏登録12件登録（B1 完了後）
+- B3: 212件資格修正（B2 完了後）
+
+## 2026-03-05 B0 — Sheet State Check
+
+### Current Status (as of 2026-03-05 00:51 UTC)
+- **2026年02月 tab**: 785 total rows
+  - Pending transcription records: **0**
+    - Empty: 0
+    - エラー：システム: 0
+    - エラー：マスタ不備: 0
+    - 修正あり: 0
+  - ✅ All transcription records are complete (転記フラグ is set for all)
+
+- **削除 tab**: 1 total row
+  - Pending deletion records: **1**
+    - 削除済み: 0
+    - 削除不要: 0
+    - Pending (other): 1
+  - ⚠️ 1 record awaiting deletion status decision
+
+### Key Findings
+1. **Transcription workflow is 100% complete** — All 785 records in 2026年02月 have been processed
+2. **Deletion workflow has 1 pending record** — Needs status update (either '削除済み' or '削除不要')
+3. **Column layout verified**: T(19) = 転記フラグ correctly positioned after C1 insertion
+
+### Evidence
+- Saved to: `.sisyphus/evidence/B0-status.txt`
+- Script: `scripts/check-sheet-state.ts`
+
+### Next Steps (Wave 2)
+- B1: Delete 4 unnecessary HAM records (after B0 confirmation)
+- B2: Register 12 missing records
+- B3: Correct 212 qualification mismatches
+
+## 2026-03-05 B1 — HAM Extra Record Deletion
+
+### Results
+- All 4 target records processed. B1 complete.
+- Record 1: 窪田正浩 02/06 17:30 川口千尋 → DELETED (assignid=283, record2flag=0)
+- Record 2: 窪田正浩 02/08 16:20 川口千尋 → DELETED (assignid=339, record2flag=0)
+- Record 3: 生野由美子 02/21 12:00 → DELETED (assignid=873, record2flag=0)
+- Record 4: 有田勉 02/08 16:00 → ALREADY CORRECT (only 1 record in HAM = 1 in sheet, no deletion needed)
+
+### Deletion Technique (Playwright MCP)
+- Safe pattern: `window.confirm = () => true` + `confirmDelete(assignid, '0')` via frame.evaluate()
+- Then submit act_update: set `form.lockCheck.value = '1'`, `form.doAction.value = 'act_update'`, `form.target = 'commontarget'`
+- Verification: re-navigate to k2_2 and confirm record absent
+
+### Key Observations
+- HAM dialog bypass: override `window.confirm = () => true` BEFORE calling confirmDelete()
+- MCP connection can drop mid-session; re-open and verify state rather than re-executing
+- record2flag=0 means deletion is allowed (no 記録書II lock)
+- 有田勉 duplicate: only 1 record found (assignid=473, no staff) — prior session or reconciliation may have already cleaned it
+
+### Evidence
+- `.sisyphus/evidence/B1-deletions.txt` — full deletion log with verification details

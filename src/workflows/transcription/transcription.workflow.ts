@@ -238,6 +238,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // O列「緊急時支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
     if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
 
+    // P列「同行者」→ 転記なし（転記処理詳細: 同行者は転記対象外）
+    if (record.accompanyClerkCheck.trim() === '同行者') return false;
+    // P列「複数人(副)」かつ Q列=TRUE → 転記なし（転記処理詳細: 複数人(副)+複数名訪問(二)は転記対象外）
+    const multiVisitTruthy = record.multipleVisit?.trim().toLowerCase();
+    if (record.accompanyClerkCheck.trim() === '複数人(副)' &&
+        (multiVisitTruthy === 'true' || multiVisitTruthy === '1')) return false;
+
     if (record.transcriptionFlag === '転記済み') return false;
     if (record.transcriptionFlag === '') return true;
     if (record.transcriptionFlag === 'エラー：システム') return true;
@@ -2084,9 +2091,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       return;
     }
 
-    // 通常/緊急: 看護師 > 准看護師 の優先順位
+    // 通常/緊急: 看護師 > 准看護師 > 理学療法士等 の優先順位
     const hasKangoshi = staffQuals.some(q => q === '看護師' || q === '正看護師');
     const hasJunKangoshi = staffQuals.some(q => q === '准看護師');
+    const hasRigakuForNormal = staffQuals.some(q =>
+      q.includes('理学療法士') || q.includes('作業療法士') || q.includes('言語聴覚士')
+    );
 
     if (hasKangoshi) {
       await this.selectQualificationInFrame(nav, 'kangoshi');
@@ -2094,6 +2104,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     } else if (hasJunKangoshi) {
       await this.selectQualificationInFrame(nav, 'junkangoshi');
       logger.debug(`Step 7.5: 資格選択 → 准看護師等 (${record.staffName})`);
+    } else if (hasRigakuForNormal) {
+      await this.selectQualificationInFrame(nav, 'rigaku');
+      logger.debug(`Step 7.5: 資格選択 → 理学療法士等 (${record.staffName})`);
     }
   }
 
