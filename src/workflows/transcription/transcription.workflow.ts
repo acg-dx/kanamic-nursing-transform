@@ -292,8 +292,41 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // === Step 3: k2_1 で患者検索 ===
     const monthStart = toHamMonthStart(record.visitDate);
     await nav.setSelectValue('searchdate', monthStart);
-    // 全患者を検索
-    await nav.submitForm({ action: 'act_search', waitForPageId: 'k2_1' });
+
+    // 検索前のフレーム URL を記録（リロード検出用）
+    // 既に k2_1 にいる場合、submitForm → waitForPageId:'k2_1' は
+    // URL が既に k2_1 を含むため即座に旧ページを返してしまう。
+    // フレーム URL の変化（一時的に空 or 別 URL → k2_1 に戻る）を検出して
+    // 実際のリロード完了を待つ。
+    const preSearchFrame = await nav.getMainFrame('k2_1');
+    const preSearchUrl = preSearchFrame.url();
+
+    // 全患者を検索（waitForPageId は使わない — 下記で独自にリロード待ち）
+    await nav.submitForm({ action: 'act_search' });
+
+    // フレームリロード待ち: URL が一旦変化するか、DOM が再構築されるまで待機
+    for (let waitIdx = 0; waitIdx < 30; waitIdx++) {
+      await this.sleep(500);
+      try {
+        const f = await nav.getMainFrame();
+        const currentUrl = f.url();
+        // URL が変化した（リロード発生）→ k2_1 の再出現を待つ
+        if (currentUrl !== preSearchUrl) break;
+        // URL が同じでも forms[0] が一時的に消えた→リロード中
+        const hasForm = await f.evaluate(() => !!document.forms[0]).catch(() => false);
+        if (!hasForm) break;
+        // 決定ボタンが表示されたら検索結果がロード済み
+        const hasResults = await f.evaluate(() =>
+          document.querySelectorAll('input[name="act_result"][value="決定"]').length > 0
+        ).catch(() => false);
+        if (hasResults && waitIdx >= 2) break; // 最低1秒は待つ
+      } catch {
+        break; // フレーム遷移中
+      }
+    }
+
+    // k2_1 のフレームが完全にロードされるまで待機
+    await nav.waitForMainFrame('k2_1', 15000);
     await this.sleep(1000);
     logger.debug(`Step 3: 患者検索実行 (${monthStart})`);
 
