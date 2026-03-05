@@ -22,7 +22,7 @@
 import { BaseWorkflow } from '../base-workflow';
 import { logger } from '../../core/logger';
 import { withRetry } from '../../core/retry-manager';
-import { normalizeCjkName, CJK_VARIANT_MAP_SERIALIZABLE } from '../../core/cjk-normalize';
+import { normalizeCjkName, CJK_VARIANT_MAP_SERIALIZABLE, extractPlainName } from '../../core/cjk-normalize';
 import { ServiceCodeResolver } from '../../services/service-code-resolver';
 import { PatientMasterService } from '../../services/patient-master.service';
 import type { ServiceCodeResult } from '../../services/service-code-resolver';
@@ -426,11 +426,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // === Step 7: k2_3a でサービスコード選択 ===
     await nav.switchInsuranceType(codeResult.showflag);
     await this.sleep(2000); // 保険種別切替後のリロード待ち
+
+    // === Step 7.5: k2_3a でスタッフ資格選択（医療保険のみ）— サービスコード選択の前に実行 ===
+    // 資格フィルタを先に適用することで、サービスコード一覧が准看護師用に絞り込まれる
+    await this.selectQualificationCheckbox(nav, record, codeResult);
+
     await nav.selectServiceCode(codeResult.servicetype, codeResult.serviceitem, undefined, codeResult.textPattern);
     logger.debug(`Step 7: サービスコード選択完了 (${codeResult.servicetype}#${codeResult.serviceitem})`);
-
-    // === Step 7.5: k2_3a でスタッフ資格チェックボックス選択（医療保険のみ）===
-    await this.selectQualificationCheckbox(nav, record, codeResult);
 
     // 次へ → k2_3b
     await nav.submitForm({ action: 'act_next', waitForPageId: 'k2_3b' });
@@ -516,7 +518,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // Stage 3: スタッフ検索 + HAM choice() 呼び出し
     // CJK 異体字正規化: NFKC + 旧字体→新字体（眞→真, 﨑→崎 等）
-    const staffSearchName = normalizeCjkName(record.staffName);
+    // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみ使用
+    const staffSearchName = normalizeCjkName(extractPlainName(record.staffName));
     const choiceResult = await staffFrame.evaluate((args: { searchName: string; variantMap: [string, string][] }) => {
       function normCjk(s: string): string {
         let r = s.normalize('NFKC');
@@ -1088,9 +1091,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // HAM に未登録のスタッフを特定
     // NFKC 正規化で CJK 異体字を統一（﨑→崎, 髙→高 等）
+    // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみ使用
     const missingStaff: { staffName: string; staffNumber: string }[] = [];
     for (const [staffName, info] of staffMap) {
-      const normalized = normalizeCjkName(staffName);
+      const normalized = normalizeCjkName(extractPlainName(staffName));
       if (!hamStaffNames.has(normalized) && !hamStaffNames.has(staffName)) {
         missingStaff.push(info);
       }
@@ -1173,7 +1177,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   ): Promise<void> {
     const hamPage = nav.hamPage;
     // CJK 異体字正規化: NFKC + 旧字体→新字体（眞→真, 﨑→崎 等）
-    const staffSearchName = normalizeCjkName(record.staffName);
+    // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみ使用
+    const staffSearchName = normalizeCjkName(extractPlainName(record.staffName));
 
     // 未配置行の assignId を全て取得（日付フィルタなし — 子行には日付表示がないため）
     const frame = await nav.getMainFrame('k2_2');
@@ -1826,7 +1831,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 医療保険 (showflag=3) のみ
     if (codeResult.showflag !== '3') return;
 
-    const staffQuals = this.staffQualifications.get(record.staffName) || [];
+    // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみで検索
+    const staffQuals = this.staffQualifications.get(extractPlainName(record.staffName)) || [];
     if (staffQuals.length === 0) {
       logger.debug(`資格情報なし: ${record.staffName}（デフォルト選択を使用）`);
       return;
@@ -1867,57 +1873,57 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
-   * k2_3a フレーム内で資格チェックボックス/ラジオを選択
+   * k2_3a フレーム内で資格ラジオボタン(searchKbn)を選択し、検索ボタンをクリック
+   *
+   * 実際の HAM HTML:
+   *   <input type="radio" name="searchKbn" value="1" checked>看護師等
+   *   <input type="radio" name="searchKbn" value="2">准看護師
+   *   <input type="radio" name="searchKbn" value="3">理学療法士等
+   *   <input type="button" value="検索" onclick="submitTargetForm(this.form, 'change_flag')">
+   *
+   * 旧実装は name.includes('shikaku') で検索していたが HAM HTML は searchKbn を使用するため
+   * 常にマッチせず、全件デフォルト看護師等で登録されていた（根本原因バグ）。
    */
   private async selectQualificationInFrame(
     nav: HamNavigator,
     qualType: 'kangoshi' | 'junkangoshi' | 'rigaku',
   ): Promise<void> {
-    const frame = await nav.getMainFrame('k2_3a');
-    await frame.evaluate((qType) => {
-      const form = document.forms[0];
-      // k2_3a の資格選択は radio/checkbox (name に shikaku/staff を含む)
-      // 値: kangoshi=1, junkangoshi=2, rigaku=3
-      const valueMap: Record<string, string> = {
-        kangoshi: '1',
-        junkangoshi: '2',
-        rigaku: '3',
-      };
-      const targetValue = valueMap[qType];
+    const valueMap: Record<string, string> = {
+      kangoshi: '1',
+      junkangoshi: '2',
+      rigaku: '3',
+    };
+    const targetValue = valueMap[qualType];
 
-      // ラジオボタンを試す
-      const radios = form.querySelectorAll('input[type="radio"]');
+    const frame = await nav.getMainFrame('k2_3a');
+
+    // searchKbn ラジオボタンを選択
+    await frame.evaluate((val) => {
+      const radios = document.querySelectorAll('input[name="searchKbn"]');
       for (const radio of Array.from(radios)) {
         const r = radio as HTMLInputElement;
-        if (r.value === targetValue && (r.name.includes('shikaku') || r.name.includes('staff'))) {
+        if (r.value === val) {
           r.checked = true;
-          return;
+          r.dispatchEvent(new Event('change', { bubbles: true }));
+          break;
         }
       }
+    }, targetValue);
 
-      // チェックボックスを試す
-      const checkboxes = form.querySelectorAll('input[type="checkbox"]');
-      for (const cb of Array.from(checkboxes)) {
-        const c = cb as HTMLInputElement;
-        if (c.value === targetValue && (c.name.includes('shikaku') || c.name.includes('staff'))) {
-          c.checked = true;
-          return;
+    // 検索ボタンをクリックしてフィルタ結果を表示
+    await frame.evaluate(() => {
+      const buttons = document.querySelectorAll('input[type="button"]');
+      for (const btn of Array.from(buttons)) {
+        const b = btn as HTMLInputElement;
+        if (b.value === '検索') {
+          b.click();
+          break;
         }
       }
+    });
 
-      // select 要素を試す
-      const selects = form.querySelectorAll('select');
-      for (const sel of Array.from(selects)) {
-        if (sel.name.includes('shikaku') || sel.name.includes('staff')) {
-          for (const opt of Array.from(sel.options)) {
-            if (opt.value === targetValue) {
-              sel.value = targetValue;
-              return;
-            }
-          }
-        }
-      }
-    }, qualType);
+    // ページリロード待ち（検索結果表示まで）
+    await this.sleep(2000);
   }
 
   /**
