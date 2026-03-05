@@ -570,7 +570,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
     if (!choiceResult.found) {
-      throw new Error(`スタッフ「${record.staffName}」が見つかりません（HAMに登録されていません）`);
+      throw new Error(`スタッフ「${record.staffName}」(検索名: ${staffSearchName}) が見つかりません（HAMに登録されていません）`);
     }
     await this.sleep(3000);
 
@@ -1791,9 +1791,16 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(2000);
     }
 
-    // confirmDelete() は内部で form.submit() を実行済み → ページリロードを待つだけ
-    // ※ 以前は nav.submitForm(act_update) を二重送信していたため form.doAction 消失バグが発生
-    await nav.waitForMainFrame('k2_2', 15000);
+    // confirmDelete() はクライアント側の UI 変更のみ（行を非表示にする）。
+    // サーバーへの永続化には上書き保存 (act_update) が必須。
+    // ※ deletion.workflow.ts / delete-staff-null-records.ts と同一パターン。
+    // ※ 旧実装では act_update を省略していたため削除が反映されず、
+    //   旧レコードが残ったまま新レコードが作成される不具合が発生していた。
+    await nav.submitForm({
+      action: 'act_update',
+      setLockCheck: true,
+      waitForPageId: 'k2_2',
+    });
     await this.sleep(2000);
 
     // form.doAction が復元されていることを確認（後続の act_addnew で必須）
@@ -1807,7 +1814,30 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(1000);
     }
 
-    logger.info(`既存スケジュール削除完了: assignid=${deleteInfo.assignid}`);
+    // 削除が実際に反映されたか検証（同一日付+時刻のエントリが消えていること）
+    const verifyFrame = await nav.getMainFrame('k2_2');
+    const stillExists = await verifyFrame.evaluate(({ targetDay, st }) => {
+      const dayRegex = /(?:^|[^0-9])(\d{1,2})日/;
+      const rows = Array.from(document.querySelectorAll('tr'));
+      let currentDay = -1;
+      for (const row of rows) {
+        const rowText = row.textContent || '';
+        const dayMatch = rowText.match(dayRegex);
+        if (dayMatch) currentDay = parseInt(dayMatch[1]);
+        if (currentDay !== targetDay) continue;
+        if (!rowText.includes(st)) continue;
+        const delBtn = row.querySelector('input[name="act_delete"][value="削除"]');
+        if (delBtn) return true;
+      }
+      return false;
+    }, { targetDay: dayNum, st: startTime });
+
+    if (stillExists) {
+      logger.error(`削除検証失敗: assignid=${deleteInfo.assignid} — 上書き保存後もレコードが残存`);
+      return false;
+    }
+
+    logger.info(`既存スケジュール削除完了（検証済み）: assignid=${deleteInfo.assignid}`);
     return true;
   }
 
