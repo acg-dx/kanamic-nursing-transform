@@ -52,7 +52,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
   /** スタッフ資格マップを設定 (staffName → [資格1, 資格2, ...]) */
   setStaffQualifications(qualMap: Map<string, string[]>): void {
-    this.staffQualifications = qualMap;
+    // SmartHR は "姓 名"（半角スペースあり）、Sheet は "姓名"（スペースなし）で
+    // 名前フォーマットが異なるため、空白を除去して正規化した Map を作成する
+    this.staffQualifications = new Map();
+    for (const [name, quals] of qualMap) {
+      this.staffQualifications.set(name.replace(/[\s\u3000]+/g, ''), quals);
+    }
   }
 
   /** SmartHR + StaffSync を設定（転記前スタッフ自動補登用） */
@@ -1925,9 +1930,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     if (codeResult.showflag !== '3') return;
 
     // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみで検索
-    const staffQuals = this.staffQualifications.get(extractPlainName(record.staffName)) || [];
+    // 空白除去: SmartHR は "姓 名"、Sheet は "姓名" のため正規化して照合
+    const lookupName = extractPlainName(record.staffName).replace(/[\s\u3000]+/g, '');
+    const staffQuals = this.staffQualifications.get(lookupName) || [];
     if (staffQuals.length === 0) {
-      logger.debug(`資格情報なし: ${record.staffName}（デフォルト選択を使用）`);
+      logger.warn(`資格情報なし: ${record.staffName} (lookup="${lookupName}")（デフォルト選択を使用）`);
       return;
     }
 
