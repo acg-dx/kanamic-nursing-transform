@@ -1560,9 +1560,22 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const result = await frame.evaluate(({ dd, st }) => {
-      // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
-      const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
+    const result = await frame.evaluate(({ targetDay, st }) => {
+      // HAM k2_2 は rowspan で日付セルを結合するため、日付テキストは日グループの
+      // 最初の <tr> にしか存在しない。全 <tr> を走査して currentDay を追跡し、
+      // 各配置ボタンがどの日に属するかを判定する。
+      const dayPattern = /(?:^|[^0-9])(\d{1,2})日/;
+      const allRows = Array.from(document.querySelectorAll('tr'));
+
+      // まず全行を走査して各行の所属日を記録
+      const rowDayMap = new Map<Element, number>();
+      let currentDay = -1;
+      for (const row of allRows) {
+        const m = (row.textContent || '').match(dayPattern);
+        if (m) currentDay = parseInt(m[1]);
+        rowDayMap.set(row, currentDay);
+      }
+
       const btns = Array.from(document.querySelectorAll('input[name="act_modify"][value="配置"]'));
       const all: { id: string; hasStaff: boolean; matchDay: boolean; matchTime: boolean }[] = [];
 
@@ -1575,11 +1588,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         const rowText = tr?.textContent || '';
         const staffCell = tr?.querySelector('td[bgcolor="#DDEEFF"]');
         const hasStaff = !!(staffCell?.textContent?.trim());
+        const rowDay = tr ? (rowDayMap.get(tr) ?? -1) : -1;
 
         all.push({
           id: m[1],
           hasStaff,
-          matchDay: dayRegex.test(rowText),
+          matchDay: rowDay === targetDay,
           matchTime: st ? rowText.includes(st) : true,
         });
       }
@@ -1604,7 +1618,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       // フォールバック
       if (all.length > 0) return all[all.length - 1].id;
       return null;
-    }, { dd: dayDisplay, st: startTime || '' });
+    }, { targetDay: dayNum, st: startTime || '' });
 
     if (result) {
       logger.debug(`assignId検出: ${result} (day=${dayDisplay}${startTime ? `, time=${startTime}` : ''})`);
@@ -1704,13 +1718,25 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const deleteInfo = await frame.evaluate(({ dd, st }) => {
-      // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
-      const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
+    const deleteInfo = await frame.evaluate(({ targetDay, st }) => {
+      // HAM k2_2 は rowspan で日付セルを結合するため、日付テキストは日グループの
+      // 最初の <tr> にしか存在しない。行を順番に走査し、最後に見つけた日付を追跡する。
+      const dayRegex = /(?:^|[^0-9])(\d{1,2})日/;
       const rows = Array.from(document.querySelectorAll('tr'));
+      let currentDay = -1;
+
       for (const row of rows) {
         const rowText = row.textContent || '';
-        if (!dayRegex.test(rowText)) continue;
+
+        // 日付を含む行なら currentDay を更新
+        const dayMatch = rowText.match(dayRegex);
+        if (dayMatch) {
+          currentDay = parseInt(dayMatch[1]);
+        }
+
+        // 目的の日でなければスキップ
+        if (currentDay !== targetDay) continue;
+        // 開始時刻が含まれていなければスキップ
         if (!rowText.includes(st)) continue;
 
         const delBtn = row.querySelector('input[name="act_delete"][value="削除"]') as HTMLInputElement | null;
@@ -1728,7 +1754,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         };
       }
       return { found: false };
-    }, { dd: dayDisplay, st: startTime });
+    }, { targetDay: dayNum, st: startTime });
 
     if (!deleteInfo.found) {
       logger.debug(`削除対象なし: ${dayDisplay} ${startTime}`);
