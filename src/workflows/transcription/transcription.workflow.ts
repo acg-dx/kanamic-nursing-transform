@@ -1791,19 +1791,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(2000);
     }
 
-    // confirmDelete() はクライアント側の UI 変更のみ（行を非表示にする）。
-    // サーバーへの永続化には上書き保存 (act_update) が必須。
-    // ※ deletion.workflow.ts / delete-staff-null-records.ts と同一パターン。
-    // ※ 旧実装では act_update を省略していたため削除が反映されず、
-    //   旧レコードが残ったまま新レコードが作成される不具合が発生していた。
-    await nav.submitForm({
-      action: 'act_update',
-      setLockCheck: true,
-      waitForPageId: 'k2_2',
-    });
+    // confirmDelete() の挙動は二通り:
+    //   A) 内部で form.submit() を実行 → ページリロード → サーバー側で削除完了
+    //   B) クライアント側の UI 変更のみ → act_update（上書き保存）で永続化が必要
+    // 両方に対応するため、まずページリロードを待って検証し、
+    // 残存していれば act_update で永続化を試みる。
+
+    // ページリロード完了を待つ（confirmDelete が form.submit() した場合に備える）
+    await nav.waitForMainFrame('k2_2', 15000);
     await this.sleep(2000);
 
-    // form.doAction が復元されていることを確認（後続の act_addnew で必須）
+    // form.doAction の復元を待つ（後続の act_addnew で必須）
     for (let waitIdx = 0; waitIdx < 10; waitIdx++) {
       const f = await nav.getMainFrame('k2_2');
       const ready = await f.evaluate(() => {
@@ -1814,7 +1812,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(1000);
     }
 
-    // 削除が実際に反映されたか検証（同一日付+時刻のエントリが消えていること）
+    // 削除が反映されたか検証（同一日付+時刻のエントリが消えていること）
     const verifyFrame = await nav.getMainFrame('k2_2');
     const stillExists = await verifyFrame.evaluate(({ targetDay, st }) => {
       const dayRegex = /(?:^|[^0-9])(\d{1,2})日/;
@@ -1832,12 +1830,50 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       return false;
     }, { targetDay: dayNum, st: startTime });
 
-    if (stillExists) {
+    if (!stillExists) {
+      // パターン A: confirmDelete が内部 form.submit() でサーバー反映済み
+      logger.info(`既存スケジュール削除完了（confirmDelete 内部処理）: assignid=${deleteInfo.assignid}`);
+      return true;
+    }
+
+    // パターン B: confirmDelete はクライアント側のみ → 上書き保存で永続化
+    logger.info('confirmDelete 後もレコード残存 → 上書き保存で永続化を試行');
+    try {
+      await nav.submitForm({
+        action: 'act_update',
+        setLockCheck: true,
+        waitForPageId: 'k2_2',
+      });
+      await this.sleep(2000);
+    } catch (saveErr) {
+      logger.error(`削除の上書き保存エラー: ${(saveErr as Error).message}`);
+      return false;
+    }
+
+    // 上書き保存後の再検証
+    const verifyFrame2 = await nav.getMainFrame('k2_2');
+    const stillExists2 = await verifyFrame2.evaluate(({ targetDay, st }) => {
+      const dayRegex = /(?:^|[^0-9])(\d{1,2})日/;
+      const rows = Array.from(document.querySelectorAll('tr'));
+      let currentDay = -1;
+      for (const row of rows) {
+        const rowText = row.textContent || '';
+        const dayMatch = rowText.match(dayRegex);
+        if (dayMatch) currentDay = parseInt(dayMatch[1]);
+        if (currentDay !== targetDay) continue;
+        if (!rowText.includes(st)) continue;
+        const delBtn = row.querySelector('input[name="act_delete"][value="削除"]');
+        if (delBtn) return true;
+      }
+      return false;
+    }, { targetDay: dayNum, st: startTime });
+
+    if (stillExists2) {
       logger.error(`削除検証失敗: assignid=${deleteInfo.assignid} — 上書き保存後もレコードが残存`);
       return false;
     }
 
-    logger.info(`既存スケジュール削除完了（検証済み）: assignid=${deleteInfo.assignid}`);
+    logger.info(`既存スケジュール削除完了（上書き保存で永続化）: assignid=${deleteInfo.assignid}`);
     return true;
   }
 
