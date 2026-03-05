@@ -449,7 +449,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 新規行が表示されるまでリトライ（k2_2 再読み込みに時間がかかる場合がある）
     let assignId: string | null = null;
     for (let attempt = 0; attempt < 10; attempt++) {
-      assignId = await this.findNewAssignId(nav, visitDateHam);
+      assignId = await this.findNewAssignId(nav, visitDateHam, record.startTime);
       if (assignId) break;
       logger.debug(`Step 9: 新規行待ち (${attempt + 1}/10)...`);
       await this.sleep(2000);
@@ -1509,16 +1509,20 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    *
    * HAM の日付表示形式は "X日" (e.g. "1日", "15日")。
    * 新規行はスタッフ未配置（担当スタッフ欄が空）なので、
-   * 日付マッチ + 未配置の行を優先して特定する。
+   * 日付マッチ + 時刻マッチ + 未配置の行を優先して特定する。
+   *
+   * 田中穂純バグ修正: 同一患者・同一日に複数レコード (例: 16:00, 17:00) がある場合、
+   * 日付のみのマッチだと間違った行を返す可能性がある。startTime を追加して
+   * 日付+時刻+未配置 の3条件で正確にマッチする。
    */
-  private async findNewAssignId(nav: HamNavigator, visitDateHam: string): Promise<string | null> {
+  private async findNewAssignId(nav: HamNavigator, visitDateHam: string, startTime?: string): Promise<string | null> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const result = await frame.evaluate((dd) => {
+    const result = await frame.evaluate(({ dd, st }) => {
       const btns = Array.from(document.querySelectorAll('input[name="act_modify"][value="配置"]'));
-      const all: { id: string; hasStaff: boolean; matchDay: boolean }[] = [];
+      const all: { id: string; hasStaff: boolean; matchDay: boolean; matchTime: boolean }[] = [];
 
       for (const btn of btns) {
         const onclick = btn.getAttribute('onclick') || '';
@@ -1530,26 +1534,38 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         const staffCell = tr?.querySelector('td[bgcolor="#DDEEFF"]');
         const hasStaff = !!(staffCell?.textContent?.trim());
 
-        all.push({ id: m[1], hasStaff, matchDay: rowText.includes(dd) });
+        all.push({
+          id: m[1],
+          hasStaff,
+          matchDay: rowText.includes(dd),
+          matchTime: st ? rowText.includes(st) : true,
+        });
       }
 
-      // 優先1: 指定日 + 未配置
+      // 優先1: 指定日 + 指定時刻 + 未配置（最も正確）
+      for (const item of all) {
+        if (item.matchDay && item.matchTime && !item.hasStaff) return item.id;
+      }
+      // 優先2: 指定日 + 未配置（時刻マッチなし — 後方互換）
       for (const item of all) {
         if (item.matchDay && !item.hasStaff) return item.id;
       }
-      // 優先2: 未配置（最後）
+      // 優先3: 未配置（最後）
       const unassigned = all.filter(i => !i.hasStaff);
       if (unassigned.length > 0) return unassigned[unassigned.length - 1].id;
-      // 優先3: 指定日（最後）
+      // 優先4: 指定日 + 指定時刻（最後）
+      const dayTimeMatch = all.filter(i => i.matchDay && i.matchTime);
+      if (dayTimeMatch.length > 0) return dayTimeMatch[dayTimeMatch.length - 1].id;
+      // 優先5: 指定日（最後）
       const dayMatch = all.filter(i => i.matchDay);
       if (dayMatch.length > 0) return dayMatch[dayMatch.length - 1].id;
       // フォールバック
       if (all.length > 0) return all[all.length - 1].id;
       return null;
-    }, dayDisplay);
+    }, { dd: dayDisplay, st: startTime || '' });
 
     if (result) {
-      logger.debug(`assignId検出: ${result} (day=${dayDisplay})`);
+      logger.debug(`assignId検出: ${result} (day=${dayDisplay}${startTime ? `, time=${startTime}` : ''})`);
     }
     return result;
   }
