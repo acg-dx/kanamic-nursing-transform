@@ -19,6 +19,7 @@
 import { BaseWorkflow } from '../base-workflow';
 import { logger } from '../../core/logger';
 import { withRetry } from '../../core/retry-manager';
+import { CJK_VARIANT_MAP_SERIALIZABLE } from '../../core/cjk-normalize';
 import { toHamDate, toHamMonthStart } from '../../services/time-utils';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError } from '../../types/workflow.types';
@@ -205,6 +206,19 @@ export class DeletionWorkflow extends BaseWorkflow {
     await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除済み');
     logger.info(`削除完了: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
 
+    // === Step 7: 月次シートから対象行を削除 ===
+    const monthTab = this.visitDateToMonthTab(record.visitDate);
+    if (monthTab) {
+      const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTab, record.recordId);
+      if (rowDeleted) {
+        logger.info(`月次シート行削除完了: ${record.recordId} (tab=${monthTab})`);
+      } else {
+        logger.warn(`月次シートに行が見つかりません: ${record.recordId} (tab=${monthTab})`);
+      }
+    } else {
+      logger.warn(`月次シートタブ名を特定できません: visitDate=${record.visitDate}`);
+    }
+
     // メインメニューに戻る（次のレコード用）
     await this.auth.navigateToMainMenu();
   }
@@ -300,7 +314,7 @@ export class DeletionWorkflow extends BaseWorkflow {
   private async findPatientId(nav: HamNavigator, patientName: string): Promise<string | null> {
     const frame = await nav.getMainFrame('k2_1');
 
-    const result = await frame.evaluate((name) => {
+    const result = await frame.evaluate((args: { name: string; variantMap: [string, string][] }) => {
       const careUserIdRegex = /careuserid\s*,\s*'(\d+)'/;
       const careUserIdRegex2 = /careuserid\.value\s*=\s*['"](\d+)['"]/;
 
@@ -312,11 +326,16 @@ export class DeletionWorkflow extends BaseWorkflow {
         return null;
       }
 
+      // NFKC + 旧字体→新字体（眞→真 等）で正規化
       function normalize(s: string): string {
-        return s.replace(/[\s\u3000\u00a0]+/g, '').trim();
+        let r = s.normalize('NFKC');
+        for (const [old, rep] of args.variantMap) {
+          if (r.includes(old)) r = r.replaceAll(old, rep);
+        }
+        return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
       }
 
-      const normalizedName = normalize(name);
+      const normalizedName = normalize(args.name);
 
       // 決定ボタンの onclick から患者名でマッチ
       const allButtons = Array.from(document.querySelectorAll('input[name="act_result"][value="決定"]'));
@@ -343,7 +362,7 @@ export class DeletionWorkflow extends BaseWorkflow {
       }
 
       return null;
-    }, patientName);
+    }, { name: patientName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
     if (result) {
       logger.debug(`患者ID検出: ${patientName} → ${result}`);
@@ -402,6 +421,16 @@ export class DeletionWorkflow extends BaseWorkflow {
         logger.error('再ログインにも失敗');
       }
     }
+  }
+
+  /**
+   * visitDate (YYYY-MM-DD or YYYY/MM/DD) から月次タブ名 (e.g. "2026年02月") を生成する
+   */
+  private visitDateToMonthTab(visitDate: string): string {
+    const normalized = visitDate.replace(/\//g, '-');
+    const parts = normalized.split('-');
+    if (parts.length < 2 || !parts[0] || !parts[1]) return '';
+    return `${parts[0]}年${parts[1].padStart(2, '0')}月`;
   }
 
   private sleep(ms: number): Promise<void> {

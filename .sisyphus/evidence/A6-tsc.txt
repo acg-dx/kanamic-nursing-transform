@@ -1,0 +1,1 @@
+npx tsc --noEmit: EXIT_CODE=0 (no errors) — Thu Mar  5 09:22:59     2026
