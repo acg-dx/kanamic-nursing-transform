@@ -335,27 +335,33 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     const visitDateHam = toHamDate(record.visitDate);
 
-    // === Early exit if HAM registration already complete from retry ===
-    if (hamAlreadyComplete) {
-      logger.warn(`HAM登録済み (リトライ時スキップ): ${record.recordId} — 転記ステータス更新へ直行`);
-      await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
-      await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
-      await this.clickBackButtonOnK2_2(nav);
-      return;
-    }
+    // === スケジュール作成・スタッフ配置スキップ判定 ===
+    // hamAlreadyComplete: 同一実行内リトライでスケジュール作成済み → スタッフ配置のみ
+    // dupStatus === 'partial': k2_2 にスケジュールあるがスタッフ未配置 → スタッフ配置のみ
+    // dupStatus === 'needs_jisseki': スケジュール＋スタッフ済みだが実績≠1 → 全1＋保存のみ
+    let skipScheduleCreation = hamAlreadyComplete;
+    let skipStaffAssignment = false;
 
-    // === Step 4.5a: 重複チェック — 同一日付+時刻のエントリが既にあればスキップ ===
+    // === Step 4.5a: 重複チェック — 同一日付+時刻のエントリ状態を確認 ===
     if (record.transcriptionFlag !== '修正あり') {
-      const isDuplicate = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
-      if (isDuplicate) {
+      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
         logger.info(`重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
         await this.clickBackButtonOnK2_2(nav);
         return;
       }
+      if (dupStatus === 'needs_jisseki') {
+        skipScheduleCreation = true;
+        skipStaffAssignment = true;
+      }
+      if (dupStatus === 'partial') {
+        skipScheduleCreation = true;
+      }
     }
 
+    if (!skipScheduleCreation) {
     // === Step 4.5b: 修正レコードの場合 → 既存スケジュール先行削除 ===
     if (record.transcriptionFlag === '修正あり') {
       logger.info(`修正レコード検出: ${record.recordId} — 既存スケジュールを削除します`);
@@ -443,11 +449,19 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(3000);
     logger.debug('Step 8: スケジュール確定、月間スケジュールに戻る');
     this.hamRegistrationState.set(record.recordId, true);
+    } else {
+      logger.info(`スケジュール作成スキップ（部分登録/リトライ） → ${skipStaffAssignment ? '実績設定に進む' : 'スタッフ配置に進む'}: ${record.recordId}`);
+    }
 
+    // === Step 9-10.5: スタッフ配置（skipStaffAssignment の場合はスキップ → 全1+保存のみ） ===
+    let k2_2MainFrame: Frame | null = null;
+
+    let assignId: string | null = null;
+
+    if (!skipStaffAssignment) {
     // === Step 9: k2_2 で新規行の配置ボタン → k2_2f ===
     // 配置ボタン onclick: submitTargetFormEx(this.form, 'act_modify', assignid, 'XXX')
     // 新規行が表示されるまでリトライ（k2_2 再読み込みに時間がかかる場合がある）
-    let assignId: string | null = null;
     for (let attempt = 0; attempt < 10; attempt++) {
       assignId = await this.findNewAssignId(nav, visitDateHam, record.startTime);
       if (assignId) break;
@@ -602,7 +616,6 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(3000);
 
     // k2_2 に戻るまで待機
-    let k2_2MainFrame: Frame | null = null;
     for (let i = 0; i < 20; i++) {
       const allF = hamPage.frames();
       for (const f of allF) {
@@ -618,6 +631,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       k2_2MainFrame = await nav.getMainFrame();
     }
     logger.debug('Step 10.5: k2_2 に戻った');
+    } else {
+      // skipStaffAssignment: スケジュール＋スタッフ済み → 実績フラグ設定のみ
+      logger.info(`スタッフ配置スキップ（実績フラグのみ更新）: ${record.recordId}`);
+      k2_2MainFrame = await nav.getMainFrame('k2_2');
+    }
 
     // === Step 11: k2_2 で「全1」ボタン — 実績フラグ一括設定 ===
     const all1Btn = await k2_2MainFrame.$('input[name="act_chooseall"]');
@@ -630,7 +648,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     logger.debug('Step 11: 全1ボタン実行（実績フラグ一括設定）');
 
     // === Step 11.5: k2_2 で緊急時加算チェック (必要な場合) ===
-    if (codeResult.setUrgentFlag) {
+    if (codeResult.setUrgentFlag && assignId) {
       await this.setUrgentFlag(nav, assignId);
       logger.debug('Step 11.5: 緊急時加算チェック ON');
     }
@@ -719,18 +737,30 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 日付文字列（スタッフ配置時の行検索に使用）
     const visitDateHam = toHamDate(record.visitDate);
 
-    // === 重複チェック — 同一日付+時刻のエントリが既にあればスキップ ===
+    // === 重複チェック — 同一日付+時刻のエントリ状態を確認 ===
+    let skipI5Creation = false;
+    let skipI5StaffAssignment = false;
     if (record.transcriptionFlag !== '修正あり') {
-      const isDuplicate = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
-      if (isDuplicate) {
+      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
         logger.info(`I5 重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
         await this.clickBackButtonOnK2_2(nav);
         return;
       }
+      if (dupStatus === 'needs_jisseki') {
+        skipI5Creation = true;
+        skipI5StaffAssignment = true;
+        logger.info(`I5 実績未設定検出 → 実績フラグのみ更新: ${record.recordId}`);
+      }
+      if (dupStatus === 'partial') {
+        skipI5Creation = true;
+        logger.info(`I5 部分登録検出 → スケジュール作成スキップ・スタッフ配置に進む: ${record.recordId}`);
+      }
     }
 
+    if (!skipI5Creation) {
     // Step 5: k2_2 で 訪看I5入力ボタン → k2_7_1
     await nav.submitForm({
       action: 'act_i5',
@@ -937,9 +967,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       );
     }
     logger.info(`I5フロー: k2_2 にスケジュール行（配置ボタン）${newRowCount}行 を確認`);
+    } // end if (!skipI5Creation)
 
     // === I5 スタッフ配置: 未配置の行すべてに同一スタッフを配置 ===
-    await this.assignStaffToAllUnassigned(nav, record);
+    if (!skipI5StaffAssignment) {
+      await this.assignStaffToAllUnassigned(nav, record);
+    } else {
+      logger.info(`I5 スタッフ配置スキップ（実績フラグのみ更新）: ${record.recordId}`);
+    }
 
     // 全1ボタン（実績フラグ一括設定）
     const k2_2FrameI5 = await nav.getMainFrame('k2_2');
@@ -1521,6 +1556,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const dayDisplay = `${dayNum}日`;
 
     const result = await frame.evaluate(({ dd, st }) => {
+      // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+      const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
       const btns = Array.from(document.querySelectorAll('input[name="act_modify"][value="配置"]'));
       const all: { id: string; hasStaff: boolean; matchDay: boolean; matchTime: boolean }[] = [];
 
@@ -1537,7 +1574,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         all.push({
           id: m[1],
           hasStaff,
-          matchDay: rowText.includes(dd),
+          matchDay: dayRegex.test(rowText),
           matchTime: st ? rowText.includes(st) : true,
         });
       }
@@ -1577,22 +1614,34 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    * 日付行の下に子行（日付なし）が続く場合がある。
    * 「配置」ボタンが存在する行（＝スタッフ配置済み）のみを "登録済み" と判定する。
    */
+  /**
+   * k2_2 で同一日付+開始時刻のスケジュールが既に存在するかチェック
+   *
+   * @returns 'complete'       — スケジュール＋スタッフ配置＋実績=1（完全に登録済み）
+   *          'needs_jisseki' — スケジュール＋スタッフ配置済みだが実績≠1
+   *          'partial'       — スケジュールあるがスタッフ未配置（部分登録）
+   *          'none'          — エントリなし
+   */
   private async checkDuplicateOnK2_2(
     nav: HamNavigator,
     visitDateHam: string,
     startTime: string,
-  ): Promise<boolean> {
+  ): Promise<'complete' | 'needs_jisseki' | 'partial' | 'none'> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const found = await frame.evaluate(({ dd, st }) => {
+    const result = await frame.evaluate(({ dd, st }) => {
+      // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+      const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
       const rows = Array.from(document.querySelectorAll('tr'));
       let inTargetDay = false;
+      let foundPartial = false;
+      let foundNeedsJisseki = false;
       for (const row of rows) {
         const text = row.textContent || '';
         // 日付行を検出
-        if (text.includes(dd)) {
+        if (dayRegex.test(text)) {
           inTargetDay = true;
         } else if (/^\s*\d+日/.test(text.trim())) {
           // 別の日付行に入ったらリセット
@@ -1600,17 +1649,35 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         }
         if (!inTargetDay) continue;
         if (!text.includes(st)) continue;
-        // 配置ボタンまたは編集ボタンがある → 既に登録済み
+        // 編集ボタンがある → スケジュール存在
         const hasEdit = row.querySelector('input[value="編集"]');
-        if (hasEdit) return true;
+        if (hasEdit) {
+          // スタッフ配置済みかチェック（td[bgcolor="#DDEEFF"] = 担当スタッフ欄）
+          const staffCell = row.querySelector('td[bgcolor="#DDEEFF"]');
+          const hasStaff = !!(staffCell?.textContent?.trim());
+          if (hasStaff) {
+            // 実績チェック: input[name="results"] が checked かつ value="1"
+            const resultsCheckbox = row.querySelector('input[name="results"]') as HTMLInputElement | null;
+            const hasJisseki = !!(resultsCheckbox?.checked && resultsCheckbox?.value === '1');
+            if (hasJisseki) return 'complete';
+            foundNeedsJisseki = true;
+          } else {
+            foundPartial = true;
+          }
+        }
       }
-      return false;
+      if (foundNeedsJisseki) return 'needs_jisseki';
+      return foundPartial ? 'partial' : 'none';
     }, { dd: dayDisplay, st: startTime });
 
-    if (found) {
-      logger.info(`重複検出: ${dayDisplay} ${startTime} — k2_2 に既存エントリあり。スキップします`);
+    if (result === 'complete') {
+      logger.info(`重複検出（完了済み）: ${dayDisplay} ${startTime} — スケジュール＋スタッフ配置＋実績1。スキップします`);
+    } else if (result === 'needs_jisseki') {
+      logger.info(`実績未設定検出: ${dayDisplay} ${startTime} — スケジュール＋スタッフ配置済み・実績未設定`);
+    } else if (result === 'partial') {
+      logger.info(`部分登録検出: ${dayDisplay} ${startTime} — スケジュールあり・スタッフ未配置`);
     }
-    return found;
+    return result;
   }
 
   /**
@@ -1633,10 +1700,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const dayDisplay = `${dayNum}日`;
 
     const deleteInfo = await frame.evaluate(({ dd, st }) => {
+      // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+      const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
       const rows = Array.from(document.querySelectorAll('tr'));
       for (const row of rows) {
         const rowText = row.textContent || '';
-        if (!rowText.includes(dd)) continue;
+        if (!dayRegex.test(rowText)) continue;
         if (!rowText.includes(st)) continue;
 
         const delBtn = row.querySelector('input[name="act_delete"][value="削除"]') as HTMLInputElement | null;

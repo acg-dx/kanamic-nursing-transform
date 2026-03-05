@@ -76,10 +76,12 @@ async function findOneStaffNullRow(
 ): Promise<{ assignid: string; record2flag: string; staffText: string; rowText: string } | null> {
   const frame = await nav.getMainFrame('k2_2');
   return frame.evaluate(({ dd, st }: { dd: string; st: string }) => {
+    // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+    const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
     const rows = Array.from(document.querySelectorAll('tr'));
     for (const row of rows) {
       const rowText = row.textContent || '';
-      if (!rowText.includes(dd)) continue;
+      if (!dayRegex.test(rowText)) continue;
       if (!rowText.includes(st)) continue;
 
       // 削除ボタンがあるか
@@ -121,12 +123,14 @@ async function listAllRowsForSlot(
 ): Promise<Array<{ assignid: string; staffText: string; hasStaff: boolean }>> {
   const frame = await nav.getMainFrame('k2_2');
   return frame.evaluate(({ dd, st }: { dd: string; st: string }) => {
+    // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+    const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
     const rows = Array.from(document.querySelectorAll('tr'));
     const results: { assignid: string; staffText: string; hasStaff: boolean }[] = [];
 
     for (const row of rows) {
       const rowText = row.textContent || '';
-      if (!rowText.includes(dd)) continue;
+      if (!dayRegex.test(rowText)) continue;
       if (!rowText.includes(st)) continue;
 
       // 削除ボタンまたは配置ボタンからassignidを取得

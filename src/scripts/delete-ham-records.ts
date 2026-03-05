@@ -182,12 +182,14 @@ async function main() {
         const dayDisplay = `${dayNum}日`;
 
         const deleteInfo = await k2_2Frame.evaluate(({ dd, st }) => {
+          // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
+          const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
           const rows = Array.from(document.querySelectorAll('tr'));
           const matches: { assignid: string; record2flag: string; rowText: string }[] = [];
 
           for (const row of rows) {
             const rowText = row.textContent || '';
-            if (!rowText.includes(dd)) continue;
+            if (!dayRegex.test(rowText)) continue;
             if (!rowText.includes(st)) continue;
 
             const delBtn = row.querySelector('input[name="act_delete"][value="削除"]') as HTMLInputElement | null;
