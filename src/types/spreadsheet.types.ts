@@ -37,19 +37,21 @@ export interface TranscriptionRecord {
   multipleVisit: string;
   // R: 緊急時事務員チェック
   emergencyClerkCheck: string;
-  // S: 転記フラグ
+  // S(18): 加算対象の理由 ← NEW (C1 挿入)
+  surchargeReason?: string;
+  // T(19): 転記フラグ (旧 S)
   transcriptionFlag: string;
-  // T: マスタ修正フラグ
+  // U(20): マスタ修正フラグ (旧 T)
   masterCorrectionFlag: boolean;
-  // U: エラー詳細
+  // V(21): エラー詳細 (旧 U)
   errorDetail: string;
-  // V: データ取得日時
+  // W(22): データ取得日時 (旧 V)
   dataFetchedAt: string;
-  // W: 提供票チェック
+  // X(23): 提供票チェック (旧 W)
   serviceTicketCheck: boolean;
-  // X: 備考
+  // Y(24): 備考 (旧 X)
   notes: string;
-  // Y: 実績ロック
+  // Z(25): 実績ロック (旧 Y)
   recordLocked: boolean;
 }
 
@@ -78,10 +80,11 @@ export interface CorrectionRecord {
   correctionId: string;   // A: 修正管理ID
   recordId: string;       // B: レコードID
   patientName: string;    // C: 利用者名
-  correctedAt: string;    // D: 修正日時
-  changeDetail: string;   // E: 変更内容詳細
-  status: string;         // F: ステータス
-  errorLog: string;       // G: エラーログ
+  visitDate: string;      // D: 日付
+  correctedAt: string;    // E: 修正日時
+  changeDetail: string;   // F: 変更内容詳細
+  status: string;         // G: ステータス
+  errorLog: string;       // H: エラーログ
 }
 
 /** 同一建物管理记录（独立Sheet） */
@@ -96,6 +99,16 @@ export interface BuildingManagementRecord {
   isNew: boolean;
   status: string;
   notes?: string;
+}
+
+/** 施設定義（連携シート「施設定義」タブ） */
+export interface FacilityDefinition {
+  /** A列: 拠点名（有料老人ホーム系） e.g. "有料老人ホームあおぞら南栄" */
+  sourceNameA: string;
+  /** B列: 拠点名（共同生活援助系） e.g. "共同生活援助あおぞら南栄" */
+  sourceNameB: string;
+  /** C列: カナミック登録施設名 e.g. "共生ホーム南栄" */
+  kanamickName: string;
 }
 
 /** 事业所Sheet配置 */

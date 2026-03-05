@@ -4,11 +4,30 @@ import type { TranscriptionRecord, DeletionRecord, CorrectionRecord, BuildingMan
 import type { TranscriptionStatus, DeletionStatus } from '../types/workflow.types';
 
 // Column indices (0-based)
+// NOTE: C1 変更後の列レイアウト（加算対象の理由 列を S(18) に挿入）
+//   A(0)=記録ID, B(1)=タイムスタンプ, C(2)=更新日時, D(3)=スタッフ番号, E(4)=スタッフ名
+//   F(5)=あおぞらID, G(6)=患者名, H(7)=訪問日, I(8)=開始時間, J(9)=終了時間
+//   K(10)=サービス種別1, L(11)=サービス種別2, M(12)=完了状態, N(13)=同行チェック
+//   O(14)=緊急フラグ, P(15)=同行事務員チェック, Q(16)=複数訪問, R(17)=緊急時事務員チェック
+//   S(18)=加算対象の理由 ← NEW (C1 挿入)
+//   T(19)=転記フラグ (旧 S), U(20)=マスタ修正フラグ (旧 T), V(21)=エラー詳細 (旧 U)
+//   W(22)=データ取得日時 (旧 V), X(23)=サービス票チェック (旧 W), Y(24)=備考 (旧 X)
+//   Z(25)=実績ロック (旧 Y)
 const COL_A = 0, COL_B = 1, COL_C = 2, COL_D = 3, COL_E = 4;
 const COL_F = 5, COL_G = 6, COL_H = 7, COL_I = 8, COL_J = 9;
 const COL_K = 10, COL_L = 11, COL_M = 12, COL_N = 13, COL_O = 14;
 const COL_P = 15, COL_Q = 16, COL_R = 17, COL_S = 18, COL_T = 19;
 const COL_U = 20, COL_V = 21, COL_W = 22, COL_X = 23, COL_Y = 24;
+const COL_Z = 25;
+// 列の意味（C1 挿入後）
+const COL_SURCHARGE_REASON = COL_S;   // S(18) = 加算対象の理由 (NEW)
+const COL_TRANSCRIPTION_FLAG = COL_T; // T(19) = 転記フラグ (旧 S)
+const COL_MASTER_CORRECTION = COL_U;  // U(20) = マスタ修正フラグ (旧 T)
+const COL_ERROR_DETAIL = COL_V;       // V(21) = エラー詳細 (旧 U)
+const COL_DATA_FETCHED_AT = COL_W;    // W(22) = データ取得日時 (旧 V)
+const COL_SERVICE_TICKET = COL_X;     // X(23) = サービス票チェック (旧 W)
+const COL_NOTES = COL_Y;              // Y(24) = 備考 (旧 X)
+const COL_RECORD_LOCKED = COL_Z;      // Z(25) = 実績ロック (旧 Y)
 
 function colToLetter(col: number): string {
   return String.fromCharCode(65 + col); // A=0, B=1, ...
@@ -36,7 +55,7 @@ export class SpreadsheetService {
 
   async getTranscriptionRecords(sheetId: string, tab?: string): Promise<TranscriptionRecord[]> {
     tab = tab || getCurrentMonthTab();
-    const range = `${tab}!A2:Y`;
+    const range = `${tab}!A2:Z`; // C1 変更後: Z列(25)まで取得
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
@@ -63,13 +82,14 @@ export class SpreadsheetService {
         accompanyClerkCheck: row[COL_P] || '',
         multipleVisit: row[COL_Q] || '',
         emergencyClerkCheck: row[COL_R] || '',
-        transcriptionFlag: row[COL_S] || '',
-        masterCorrectionFlag: parseBoolean(row[COL_T]),
-        errorDetail: row[COL_U] || '',
-        dataFetchedAt: row[COL_V] || '',
-        serviceTicketCheck: parseBoolean(row[COL_W]),
-        notes: row[COL_X] || '',
-        recordLocked: parseBoolean(row[COL_Y]),
+        surchargeReason: row[COL_SURCHARGE_REASON] || '',   // S(18) = 加算対象の理由 (NEW)
+        transcriptionFlag: row[COL_TRANSCRIPTION_FLAG] || '', // T(19) = 転記フラグ
+        masterCorrectionFlag: parseBoolean(row[COL_MASTER_CORRECTION]), // U(20)
+        errorDetail: row[COL_ERROR_DETAIL] || '',           // V(21)
+        dataFetchedAt: row[COL_DATA_FETCHED_AT] || '',      // W(22)
+        serviceTicketCheck: parseBoolean(row[COL_SERVICE_TICKET]), // X(23)
+        notes: row[COL_NOTES] || '',                        // Y(24)
+        recordLocked: parseBoolean(row[COL_RECORD_LOCKED]), // Z(25)
       }));
     } catch (error) {
       logger.error(`転記レコード取得エラー (sheetId: ${sheetId}): ${(error as Error).message}`);
@@ -86,12 +106,12 @@ export class SpreadsheetService {
   ): Promise<void> {
     tab = tab || getCurrentMonthTab();
     const updates: Array<{ range: string; values: string[][] }> = [
-      { range: `${tab}!${colToLetter(COL_S)}${rowIndex}`, values: [[status]] },
+      { range: `${tab}!${colToLetter(COL_TRANSCRIPTION_FLAG)}${rowIndex}`, values: [[status]] }, // T(19)
     ];
     if (errorDetail !== undefined) {
-      updates.push({ range: `${tab}!${colToLetter(COL_U)}${rowIndex}`, values: [[errorDetail]] });
+      updates.push({ range: `${tab}!${colToLetter(COL_ERROR_DETAIL)}${rowIndex}`, values: [[errorDetail]] }); // V(21)
     } else if (status === '転記済み') {
-      updates.push({ range: `${tab}!${colToLetter(COL_U)}${rowIndex}`, values: [['']] });
+      updates.push({ range: `${tab}!${colToLetter(COL_ERROR_DETAIL)}${rowIndex}`, values: [['']] }); // V(21)
     }
     for (const update of updates) {
       await this.sheets.spreadsheets.values.update({
@@ -108,7 +128,7 @@ export class SpreadsheetService {
     tab = tab || getCurrentMonthTab();
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
-      range: `${tab}!${colToLetter(COL_V)}${rowIndex}`,
+      range: `${tab}!${colToLetter(COL_DATA_FETCHED_AT)}${rowIndex}`, // W(22) データ取得日時
       valueInputOption: 'RAW',
       requestBody: { values: [[timestamp]] },
     });
