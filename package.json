@@ -10,6 +10,12 @@
     "workflow:transcription": "tsx src/index.ts --workflow transcription",
     "workflow:deletion": "tsx src/index.ts --workflow deletion",
     "workflow:building": "tsx src/index.ts --workflow building",
+    "reconciliation": "tsx src/scripts/run-reconciliation.ts",
+    "reconciliation-fix": "tsx src/scripts/run-reconciliation-fix.ts",
+    "count-pending": "tsx src/scripts/count-pending-transcription.ts",
+    "reconciliation:prev-check": "tsx src/scripts/run-reconciliation.ts --check-prev-only",
+    "verify-service-content": "tsx src/scripts/verify-service-content.ts",
+    "verify-service-content-full": "tsx src/scripts/verify-service-content-full.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -29,6 +29,8 @@ export interface WorkflowContext {
   locations?: import('./config.types').SheetLocation[];
   /** 同一建物管理: 連携スプレッドシートID */
   buildingMgmtSheetId?: string;
+  /** 処理対象の月次シートタブ名（例: "2026年02月"）。省略時は当月 */
+  tab?: string;
 }
 
 export interface WorkflowResult {

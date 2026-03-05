@@ -53,6 +53,16 @@ export class BrowserManager {
       viewport: { width: 1920, height: 1080 },
       locale: 'ja-JP',
     });
+
+    // tsx/esbuild が keepNames 変換で __name ヘルパーを注入するが、
+    // Playwright の evaluate() でシリアライズされるとブラウザ側に __name が存在せず
+    // ReferenceError になる。全フレームに polyfill を注入して回避する。
+    await this.context.addInitScript(() => {
+      if (typeof (globalThis as any).__name === 'undefined') { // eslint-disable-line @typescript-eslint/no-explicit-any
+        (globalThis as any).__name = (fn: any) => fn; // eslint-disable-line @typescript-eslint/no-explicit-any
+      }
+    });
+
     this._page = await this.context.newPage();
     this._page.setDefaultTimeout(30000);
 

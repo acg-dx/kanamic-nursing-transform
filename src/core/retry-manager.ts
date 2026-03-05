@@ -5,6 +5,8 @@ export interface RetryOptions {
   baseDelay: number;
   maxDelay: number;
   backoffMultiplier: number;
+  /** 重试前的回调（例: 页面刷新/恢复到已知状态） */
+  onRetry?: (attempt: number, error: Error) => Promise<void>;
 }
 
 const DEFAULT_OPTIONS: RetryOptions = {
@@ -36,6 +38,13 @@ export async function withRetry<T>(
         );
         logger.info(`[${label}] ${delay}ms 后重试...`);
         await sleep(delay);
+        if (opts.onRetry) {
+          try {
+            await opts.onRetry(attempt, lastError);
+          } catch (retryErr) {
+            logger.warn(`[${label}] onRetry コールバック失敗: ${(retryErr as Error).message}`);
+          }
+        }
       }
     }
   }

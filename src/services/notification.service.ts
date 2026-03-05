@@ -1,4 +1,3 @@
-import { google } from 'googleapis';
 import { logger } from '../core/logger';
 import type { NotificationConfig, DailyReport, WorkflowReport } from '../types/notification.types';
 
@@ -10,12 +9,13 @@ export class NotificationService {
   }
 
   isEnabled(): boolean {
-    return this.config.enabled;
+    // webhookUrl と to が設定されていれば有効
+    return !!(this.config.webhookUrl && this.config.to.length > 0);
   }
 
   async sendDailyReport(report: DailyReport): Promise<void> {
-    if (!this.config.enabled) {
-      logger.debug('通知が無効のためスキップ');
+    if (!this.isEnabled()) {
+      logger.debug('通知が無効のためスキップ（webhookUrl/to 未設定）');
       return;
     }
 
@@ -28,63 +28,30 @@ export class NotificationService {
       ? `[カナミックRPA] 転記処理結果 ${report.date}`
       : `[カナミックRPA] ⚠️ エラー発生 ${report.date}`;
 
-    const html = this.buildEmailHtml(report);
+    const htmlBody = this.buildEmailHtml(report);
 
     try {
-      const auth = new google.auth.GoogleAuth({
-        keyFile: this.config.serviceAccountKeyPath,
-        scopes: ['https://www.googleapis.com/auth/gmail.send'],
-        clientOptions: {
-          subject: this.config.from, // ドメイン全体の委任で送信元ユーザーを指定
-        },
+      const response = await fetch(this.config.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: this.config.to.join(','),
+          subject,
+          htmlBody,
+        }),
+        redirect: 'follow',
       });
 
-      const gmail = google.gmail({ version: 'v1', auth });
-
-      const toAddresses = this.config.to.join(', ');
-      const rawMessage = this.buildRawEmail(this.config.from, toAddresses, subject, html);
-
-      await gmail.users.messages.send({
-        userId: 'me',
-        requestBody: {
-          raw: rawMessage,
-        },
-      });
-
-      logger.info(`通知メール送信完了: ${subject}`);
+      const result = await response.json() as { success: boolean; error?: string };
+      if (result.success) {
+        logger.info(`通知メール送信完了: ${subject}`);
+      } else {
+        logger.error(`通知メール送信失敗: ${result.error || 'unknown error'}`);
+      }
     } catch (error) {
-      // Gmail API 失敗はログのみ、例外は投げない
+      // Webhook 失敗はログのみ、例外は投げない
       logger.error(`通知メール送信失敗: ${(error as Error).message}`);
     }
-  }
-
-  /**
-   * RFC 2822 形式のメールを base64url エンコードして返す
-   */
-  private buildRawEmail(from: string, to: string, subject: string, htmlBody: string): string {
-    const boundary = `boundary_${Date.now()}`;
-    const lines = [
-      `From: ${from}`,
-      `To: ${to}`,
-      `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
-      'MIME-Version: 1.0',
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      '',
-      `--${boundary}`,
-      'Content-Type: text/html; charset=UTF-8',
-      'Content-Transfer-Encoding: base64',
-      '',
-      Buffer.from(htmlBody).toString('base64'),
-      '',
-      `--${boundary}--`,
-    ];
-    const raw = lines.join('\r\n');
-    // Gmail API は base64url エンコードを要求
-    return Buffer.from(raw)
-      .toString('base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
   }
 
   private buildEmailHtml(report: DailyReport): string {

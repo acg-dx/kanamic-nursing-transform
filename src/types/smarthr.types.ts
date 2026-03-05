@@ -12,6 +12,7 @@ export interface SmartHRCrew {
   first_name_yomi: string;
   business_last_name?: string;
   business_first_name?: string;
+  gender?: string;            // "male" | "female" | null
   entered_at?: string;
   resigned_at?: string;
   employment_type?: {
@@ -26,14 +27,15 @@ export interface SmartHRCrew {
   grade?: { name: string };
   job_category?: { name: string };
   custom_fields?: Array<{
-    custom_field_template_id: string;
     value: string | null;
-    template?: {
+    template: {
       id: string;
+      name: string;
+      type: string;
       elements?: Array<{
         physical_name: string;
         name: string;
-      }>;
+      }> | null;
     };
   }>;
 }
@@ -51,6 +53,7 @@ export interface StaffMasterEntry {
   staffName: string;          // ビジネスネーム or 氏名
   staffNameLegal: string;     // 戸籍上の氏名
   staffNameYomi: string;      // フリガナ
+  gender: string;             // "male" | "female" | ""
   qualifications: string[];   // 資格1〜8
   departmentName: string;     // 部署名
   enteredAt: string;          // 入社日

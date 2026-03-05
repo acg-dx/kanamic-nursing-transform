@@ -1,6 +1,6 @@
 # 転記RPA 全体仕様書
 
-最終更新: 2026-02-27  
+最終更新: 2026-03-02  
 対象バージョン: コードベース現状（`git log --oneline -1` 参照）
 
 ---
@@ -121,7 +121,7 @@ form.submit();
 ```
 
 ### submitTargetFormEx（特殊遷移）
-k2_1→k2_2（患者選択）、k2_2→k2_2f（配置ボタン）で使用:
+k2_1→k2_2（利用者選択）、k2_2→k2_2f（配置ボタン）で使用:
 ```javascript
 // onclick="submitTargetFormEx(this.form,'k2_2',careuserid,'8876382')"
 window.submitTargetFormEx(form, pageId, hiddenField, value);
@@ -132,6 +132,15 @@ window.submitTargetFormEx(form, pageId, hiddenField, value);
 - ポーリング間隔: 300ms
 - デフォルトタイムアウト: 15000ms
 - DOM 準備確認: `document.forms[0]` の存在チェック
+
+### esbuild/tsx __name polyfill
+
+tsx（esbuild）の `keepNames` 変換は関数定義に `__name` ヘルパーを注入する。Playwright の `evaluate()` でブラウザにコードが送信される際、ブラウザ側に `__name` が存在せず `ReferenceError` になる。
+
+**対策**: `BrowserManager.launch()` で `context.addInitScript()` を使い、全フレームに polyfill を注入:
+```javascript
+globalThis.__name = (fn) => fn;
+```
 
 ### setSelectValue のフォールバック戦略
 1. 完全一致
@@ -167,9 +176,10 @@ t1-2 (メインメニュー)
 |---------|------|----------|--------|-----------|
 | Step 1 | メインメニュー → 業務ガイド | `act_k1_1` | k1_1 | - |
 | Step 2 | 業務ガイド → 利用者検索 | `act_k2_1` | k2_1 | - |
-| Step 3 | 年月設定 → 全患者検索 | `act_search` | k2_1 | 1000 |
-| Step 4 | 患者特定 → submitTargetFormEx | `k2_2` | k2_2 | 1000 |
-| Step 4.5 | 修正レコード: 既存スケジュール削除 | `confirmDelete` | k2_2 | 2000 + 2000 |
+| Step 3 | 年月設定 → 全利用者検索 | `act_search` | k2_1 | 1000 |
+| Step 4 | 利用者特定 → submitTargetFormEx | `k2_2` | k2_2 | 1000 |
+| Step 4.5a | 重複チェック（既存エントリ検出時はスキップ） | `checkDuplicateOnK2_2` | k2_2 | - |
+| Step 4.5b | 修正レコード: 既存スケジュール削除 | `confirmDelete` | k2_2 | 2000 + 2000 |
 | Step 5 | 追加ボタン | `act_addnew` | k2_3 | 1000 |
 | Step 6 | starttype 変更（条件付き） | `onchange` | k2_3 | 3000（変更時のみ） |
 | Step 6 | 時間設定 → 次へ | `act_next` | k2_3a | 1000 |
@@ -193,7 +203,13 @@ t1-2 (メインメニュー)
 ### syserror.jsp チェックポイント
 Step 4（k2_2 遷移後）、Step 5（k2_3 遷移後）、Step 9（k2_2f 遷移後）で `checkForSyserror()` を実行。
 
-### Step 4.5: 修正レコードの既存スケジュール削除
+### Step 4.5a: 重複チェック（checkDuplicateOnK2_2）
+- k2_2 テーブルの全行を走査し、同一日付 + 同一開始時刻 + 「編集」ボタン有りの行を検索
+- 該当行が存在する場合: 既に転記済みと判断し、S列を「転記済み」に更新してスキップ
+- 条件: `transcriptionFlag !== '修正あり'`（修正レコードは先に既存を削除するため重複チェック不要）
+- これにより、同一データの二重登録とスタッフ選択不可エラーを防止する
+
+### Step 4.5b: 修正レコードの既存スケジュール削除
 - 条件: `transcriptionFlag === '修正あり'`
 - 同一日付 + 同一開始時刻の行を特定
 - `confirmDelete(assignid, record2flag)` を呼び出し
@@ -221,7 +237,8 @@ serviceType1 === '介護' && serviceType2 === 'リハビリ'
 
 ### フロー概要
 ```
-Step 1-4: 通常フローと同じ（メニュー → 検索 → 患者選択 → k2_2）
+Step 1-4: 通常フローと同じ（メニュー → 検索 → 利用者選択 → k2_2）
+Step 4.5a: 重複チェック（通常フローと同じ。既存エントリがあればスキップ）
 Step 5: k2_2 で 訪看I5入力ボタン (act_i5) → k2_7_1
 Step 6: k2_7_1 で時間グループ設定
 Step 7: サービス検索 (act_search) → k2_7_1
@@ -244,7 +261,7 @@ Step 9: 全1ボタン → 上書き保存 → Google Sheets 更新
 
 ### sleep 合計（I5フロー）
 ```
-1000（患者検索後）+ 1000（k2_2遷移後）+ 1000（k2_7_1遷移後）
+1000（利用者検索後）+ 1000（k2_2遷移後）+ 1000（k2_7_1遷移後）
 + 1500（サービス検索後）+ 1000（k2_2戻り後）+ 2000（上書き保存後）= 7,500ms
 ```
 
@@ -342,7 +359,7 @@ Step 9: 全1ボタン → 上書き保存 → Google Sheets 更新
 
 | エラーパターン（メッセージ含む文字列） | S列ステータス | カテゴリ | recoverable | U列エラー詳細 |
 |----------------------------------|-------------|---------|:-----------:|-------------|
-| `患者が見つかりません` / `マスタ不備` | エラー：マスタ不備 | master | ✗ | 利用者がHAMに登録されていません |
+| `利用者が見つかりません` / `マスタ不備` | エラー：マスタ不備 | master | ✗ | 利用者がHAMに登録されていません |
 | `スタッフ` + `見つかりません` | エラー：マスタ不備 | master | ✗ | スタッフがHAMに登録されていません |
 | `医療リハビリ資格制限` | エラー：マスタ不備 | master | ✗ | 医療リハビリ：看護師/准看護師は対応不可（理学療法士等のみ） |
 | `サービスコード未検出` | エラー：システム | system | ✓ | サービスコードが見つかりません。HAM設定を確認してください |
@@ -378,6 +395,13 @@ delay = min(baseDelay × 2^(attempt-1), maxDelay)
 | 削除（processRecord） | 3 | 2000 | 10000 | 2 |
 | デフォルト | 3 | 1000 | 30000 | 2 |
 
+### 連続エラー自動停止（サーキットブレーカー）
+
+- 連続3件のレコードが失敗した場合、システム障害と判断して処理を自動中止（`MAX_CONSECUTIVE_ERRORS = 3`）
+- 成功したレコードがあればカウンターはリセットされる
+- これにより HAM サーバーへの不必要な負荷を防止する
+- 実装箇所: `processLocation()` 内のレコード処理ループ
+
 ### 実際の待機時間
 
 **転記（maxAttempts=2）**:
@@ -399,7 +423,7 @@ delay = min(baseDelay × 2^(attempt-1), maxDelay)
 
 | 場所 | sleep(ms) | 条件 |
 |------|:---------:|------|
-| Step 3: 患者検索後 | 1000 | 常時 |
+| Step 3: 利用者検索後 | 1000 | 常時 |
 | Step 4: k2_2 遷移後 | 1000 | 常時 |
 | Step 4.5: 削除ボタンクリック後 | 2000 | 修正レコードのみ |
 | Step 4.5: 上書き保存後 | 2000 | 修正レコードのみ |
@@ -466,6 +490,14 @@ delay = min(baseDelay × 2^(attempt-1), maxDelay)
 `${now.getFullYear()}年${String(now.getMonth() + 1).padStart(2, '0')}月`
 // 例: "2026年02月"
 ```
+
+デフォルトは当月タブを自動生成。`--tab` CLI パラメータで任意のタブ名を指定可能:
+```bash
+node dist/index.js --workflow=transcription --tab=2026年02月
+npx tsx src/scripts/run-transcription.ts --tab=2026年02月
+```
+
+`SpreadsheetService` の全メソッド（`getTranscriptionRecords`, `updateTranscriptionStatus`, `writeDataFetchedAt`, `formatTranscriptionColumns`）がオプション `tab?` パラメータを受け付け、`WorkflowContext.tab` 経由で全レイヤーに伝播される。
 
 ### 注意事項
 - `CorrectionDetector` クラスは `src/index.ts` にインポートされているが、インスタンス化されていない（**デッドコード**）。修正管理シートへの書き込みは本プロジェクトの範囲外。
@@ -615,8 +647,8 @@ t1-2 (メインメニュー)
 | ステップ | 操作 | アクション | 遷移先 | sleep(ms) |
 |---------|------|----------|--------|:---------:|
 | Step 1 | メインメニュー → 業務ガイド → 利用者検索 | `act_k1_1` → `act_k2_1` | k2_1 | - |
-| Step 2 | 年月設定 → 全患者検索 | `setSelectValue('searchdate')` → `act_search` | k2_1 | 1000 |
-| Step 3 | 患者特定 → 月間スケジュール | `submitTargetFormEx` → `waitForMainFrame('k2_2')` | k2_2 | 1000 |
+| Step 2 | 年月設定 → 全利用者検索 | `setSelectValue('searchdate')` → `act_search` | k2_1 | 1000 |
+| Step 3 | 利用者特定 → 月間スケジュール | `submitTargetFormEx` → `waitForMainFrame('k2_2')` | k2_2 | 1000 |
 | Step 3.5 | syserror チェック | `checkForSyserror()` | - | - |
 | Step 4 | 対象スケジュール行を特定 → 削除ボタンクリック | `deleteSchedule()` | k2_2 | 2000 |
 | Step 4（不一致時） | HAM に該当なし → 削除不要 | `updateDeletionStatus('削除不要')` | t1-2 | - |
@@ -640,12 +672,12 @@ t1-2 (メインメニュー)
 2. フォールバック: `frame.evaluate()` で `window.confirmDelete(assignid, '0')` を直接呼び出し
 3. いずれの場合も事前に `window.submited = 0` で送信ロックを解除
 
-### findPatientId（患者ID検索）
+### findPatientId（利用者ID検索）
 
 転記ワークフローと同一ロジック:
-1. `input[name="act_result"][value="決定"]` ボタンの親 `<tr>` のテキストで患者名マッチ → `onclick` から `careuserid` 抽出
+1. `input[name="act_result"][value="決定"]` ボタンの親 `<tr>` のテキストで利用者名マッチ → `onclick` から `careuserid` 抽出
 2. フォールバック: `document.body.innerHTML` を `<tr` で分割し、行テキストで部分一致検索
-3. 患者名は `normalize()` で全角/半角スペース・`&nbsp;` を除去して比較
+3. 利用者名は `normalize()` で全角/半角スペース・`&nbsp;` を除去して比較
 
 ### エラー処理（tryRecoverToMainMenu）
 1. syserror ページの「閉じる」ボタンをクリック（sleep: 1000ms）
@@ -662,7 +694,7 @@ backoffMultiplier: 2
 
 ### sleep 合計（正常ケース）
 ```
-1000（患者検索後）+ 1000（k2_2遷移後）+ 2000（削除ボタン後）+ 2000（上書き保存後）= 6,000ms
+1000（利用者検索後）+ 1000（k2_2遷移後）+ 2000（削除ボタン後）+ 2000（上書き保存後）= 6,000ms
 ```
 
 ---
@@ -761,13 +793,13 @@ Cloud Run Job トリガー (日本時間 13:00)
   ├── 2. 転記ワークフロー
   │     ├── ブラウザ起動 → TRITRUS ログイン → HAM
   │     ├── 各事業所の月次シートを処理
-  │     │     └── 各レコード: 患者検索 → スケジュール追加 → 保存 → S列更新
+  │     │     └── 各レコード: 利用者検索 → スケジュール追加 → 保存 → S列更新
   │     └── ブラウザ終了
   │
   ├── 3. 削除ワークフロー
   │     ├── ブラウザ起動 → TRITRUS ログイン → HAM
   │     ├── 各事業所の削除シートを処理
-  │     │     └── 各レコード: 患者検索 → スケジュール削除 → 保存 → M列更新
+  │     │     └── 各レコード: 利用者検索 → スケジュール削除 → 保存 → M列更新
   │     └── ブラウザ終了
   │
   └── 4. メール通知
@@ -788,10 +820,14 @@ Cloud Run Job トリガー (日本時間 13:00)
 | 単体実行 | `node dist/index.js --workflow=transcription` | 転記のみ |
 | 単体実行 | `node dist/index.js --workflow=deletion` | 削除のみ |
 | 単体実行 | `node dist/index.js --workflow=building` | 同一建物管理のみ |
+| 前月タブ処理 | `node dist/index.js --workflow=transcription --tab=2026年02月` | 指定タブの転記 |
 | ドライラン | `DRY_RUN=true node dist/index.js` | HAM 操作をスキップ（ログのみ） |
 
 ### 防重入制御
 `isRunning` フラグで二重実行を防止。前回の処理が完了していない場合はスキップ。
+
+### SIGINT ハンドリング
+`process.on('SIGINT')` で Ctrl+C を捕捉し、`process.exit(130)` で即座に終了する。async チェーンが SIGINT を飲み込んでプロセスが停止しない問題を防止。`index.ts` と `run-transcription.ts` の両方に実装。
 
 ### メール通知
 
@@ -847,3 +883,45 @@ Cloud Run Job トリガー (日本時間 13:00)
 | `LOG_LEVEL` | `info` | - | ログレベル |
 | `LOG_DIR` | `./logs` | - | ログ出力先 |
 | `SCREENSHOT_DIR` | `./screenshots` | - | スクリーンショット一時保存先 |
+
+---
+
+## 2-16. 利用者マスタ CSV 自動ダウンロード
+
+**ソース**: `src/services/patient-csv-downloader.service.ts`, `src/services/patient-master.service.ts`
+
+### 概要
+HAM の利用者一覧画面から CSV ファイルを自動ダウンロードし、要介護度等のマスタ情報を取得する。I5フローでの予防/介護判定、サービスコード選択に使用。
+
+### ダウンロードフロー
+```
+HAM t1-2 → u1-1（利用者一覧）
+  → img#Image2 (user_list.jpg) クリック
+    → CSV出力ボタン クリック
+      → Playwright download event でファイル保存
+```
+
+### ローカルキャッシュ戦略
+`ensurePatientCsv()` の検索優先順位:
+1. `./downloads/*userallfull*{YYYYMM}*.csv` → ローカルキャッシュ使用
+2. プロジェクトルート `./*userallfull*{YYYYMM}*.csv` → フォールバック
+3. いずれもなし → HAM から自動ダウンロード
+
+月1回のダウンロードで十分（利用者マスタは頻繁に変更されないため）。
+
+---
+
+## 2-17. 既知の制約事項
+
+### スタッフ選択不可（終了時間重叠問題）
+
+HAM の終了時間は `timetype` に基づいて自動計算される（手動修正しない方針: 専務確認済み 2026-02-26）。
+
+**問題**: 自動計算された終了時間と、同一スタッフの別利用者への訪問開始時間が重複する場合がある。
+- 例: 利用者Aの終了時間が自動計算で 11:10、利用者Bの開始時間が 11:00 → 10分の重複が発生
+- HAM は時間重複のあるスタッフを従業員リストに表示しない
+- RPA は「スタッフが見つかりません」エラー（`エラー：マスタ不備`）として記録する
+
+**原因**: HAM の仕様に起因。RPA 側では回避不可能。
+
+**対処方法**: 該当レコードはエラーとして記録される。手動で HAM 上の終了時間を調整した後、S列をクリアして再転記する。

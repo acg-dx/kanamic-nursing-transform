@@ -1,6 +1,12 @@
 import cron from 'node-cron';
 import { loadConfig } from './config/app.config';
 import { logger } from './core/logger';
+
+// Ctrl+C で即座に終了（async chain が SIGINT を飲み込むのを防止）
+process.on('SIGINT', () => {
+  logger.warn('SIGINT 受信 — 強制終了します');
+  process.exit(130);
+});
 import { BrowserManager } from './core/browser-manager';
 import { SelectorEngine } from './core/selector-engine';
 import { AIHealingService } from './core/ai-healing-service';
@@ -13,6 +19,9 @@ import { NotificationService } from './services/notification.service';
 import { SmartHRService } from './services/smarthr.service';
 import { StaffSyncService } from './workflows/staff-sync/staff-sync.workflow';
 import { CorrectionDetector } from './workflows/correction/correction-detection';
+import { PatientMasterService } from './services/patient-master.service';
+import { PatientCsvDownloaderService } from './services/patient-csv-downloader.service';
+import { ReconciliationService } from './services/reconciliation.service';
 import type { WorkflowContext, WorkflowResult } from './types/workflow.types';
 import type { NotificationConfig, DailyReport, WorkflowReport } from './types/notification.types';
 import type { SmartHRConfig } from './types/smarthr.types';
@@ -21,9 +30,7 @@ const config = loadConfig();
 
 // Notification config (graceful degradation if not set)
 const notificationConfig: NotificationConfig = {
-  enabled: process.env.NOTIFICATION_EMAIL_ENABLED === 'true',
-  serviceAccountKeyPath: config.sheets.serviceAccountKeyPath,
-  from: process.env.NOTIFICATION_FROM || '',
+  webhookUrl: process.env.NOTIFICATION_WEBHOOK_URL || '',
   to: (process.env.NOTIFICATION_TO || '').split(',').filter(Boolean),
 };
 
@@ -54,7 +61,7 @@ function createServices() {
   return { browser, selectorEngine, sheets, auth };
 }
 
-async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'building'): Promise<WorkflowResult[]> {
+async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'building', tab?: string): Promise<WorkflowResult[]> {
   const { browser, selectorEngine, sheets, auth } = createServices();
 
   try {
@@ -68,19 +75,52 @@ async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'buildin
       dryRun: process.env.DRY_RUN === 'true',
       locations: config.sheets.locations,
       buildingMgmtSheetId: config.sheets.buildingMgmtSheetId,
+      tab,
     };
 
     let results: WorkflowResult[];
 
     if (workflowName === 'transcription') {
       const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
+
+      // 利用者マスタ CSV を HAM からダウンロードして読み込み
+      try {
+        const csvDownloader = new PatientCsvDownloaderService(auth);
+        const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
+        const csvPath = await csvDownloader.ensurePatientCsv({ targetMonth });
+        const patientMaster = new PatientMasterService();
+        await patientMaster.loadFromCsv(csvPath);
+        workflow.setPatientMaster(patientMaster);
+        logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（自動ダウンロード）`);
+      } catch (csvError) {
+        logger.warn(`利用者マスタ CSV 自動ダウンロード失敗（転記は続行）: ${(csvError as Error).message}`);
+      }
+
+      // SmartHR が設定されている場合、転記前スタッフ自動補登を有効化
+      if (smarthrConfig) {
+        const smarthr = new SmartHRService(smarthrConfig);
+        const staffSync = new StaffSyncService(smarthr, auth);
+        workflow.setStaffAutoRegister(smarthr, staffSync);
+      }
       results = await workflow.run(context);
     } else if (workflowName === 'deletion') {
       const workflow = new DeletionWorkflow(browser, selectorEngine, sheets, auth);
       results = await workflow.run(context);
     } else {
-      const workflow = new BuildingManagementWorkflow(browser, selectorEngine, sheets, auth);
-      results = await workflow.run(context);
+      // 同一建物管理は独立した run-building.ts スクリプトで実行するため、
+      // ここでは簡易版として呼び出す。
+      const tab = context.tab || (() => {
+        const now = new Date();
+        const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        return `${prev.getFullYear()}/${String(prev.getMonth() + 1).padStart(2, '0')}`;
+      })();
+      const buildingWorkflow = new BuildingManagementWorkflow(sheets, auth, {
+        buildingMgmtSheetId: context.buildingMgmtSheetId || config.sheets.buildingMgmtSheetId,
+        tab,
+        dryRun: context.dryRun,
+      });
+      const result = await buildingWorkflow.run();
+      results = [result];
     }
 
     const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
@@ -128,7 +168,21 @@ async function runDailyJob(): Promise<void> {
       }
     }
 
-    // Step 2: 転記ワークフロー
+    // Step 2: 前月未登録チェック（pre-flight）
+    try {
+      const preflight_sheets = new SpreadsheetService(config.sheets.serviceAccountKeyPath);
+      const reconciliation = new ReconciliationService(preflight_sheets);
+      for (const location of config.sheets.locations) {
+        const prevResult = await reconciliation.checkPreviousMonthUnregistered(location.sheetId);
+        if (prevResult.hasPending) {
+          logger.warn(`[${location.name}] 前月に未登録レコード ${prevResult.pendingCount} 件を検出！ 先に前月分を処理してください。`);
+        }
+      }
+    } catch (error) {
+      logger.warn(`前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
+    }
+
+    // Step 3: 転記ワークフロー
     try {
       const transcriptionResults = await runWorkflow('transcription');
       allResults.push(...transcriptionResults);
@@ -136,7 +190,7 @@ async function runDailyJob(): Promise<void> {
       logger.error(`転記ワークフローエラー: ${(error as Error).message}`);
     }
 
-    // Step 3: 削除ワークフロー
+    // Step 4: 削除ワークフロー
     try {
       const deletionResults = await runWorkflow('deletion');
       allResults.push(...deletionResults);
@@ -144,7 +198,7 @@ async function runDailyJob(): Promise<void> {
       logger.error(`削除ワークフローエラー: ${(error as Error).message}`);
     }
 
-    // Step 4: メール通知
+    // Step 5: メール通知
     if (notificationService.isEnabled() && allResults.length > 0) {
       const today = new Date().toISOString().split('T')[0];
       const totalProcessed = allResults.reduce((sum, r) => sum + r.processedRecords, 0);
@@ -184,6 +238,7 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const workflowArg = args.find(a => a.startsWith('--workflow='))?.split('=')[1]
     || (args.includes('--workflow') ? args[args.indexOf('--workflow') + 1] : null);
+  const tabArg = args.find(a => a.startsWith('--tab='))?.split('=')[1] || undefined;
 
   if (workflowArg) {
     // 手動実行モード
@@ -191,8 +246,39 @@ async function main(): Promise<void> {
       logger.error(`不明なワークフロー: ${workflowArg}`);
       process.exit(1);
     }
+    if (tabArg) {
+      logger.info(`対象タブ: ${tabArg}`);
+    }
     try {
-      await runWorkflow(workflowArg as 'transcription' | 'deletion' | 'building');
+      const results = await runWorkflow(workflowArg as 'transcription' | 'deletion' | 'building', tabArg);
+
+      // 手動実行でもメール通知を送信
+      const notifService = new NotificationService(notificationConfig);
+      if (notifService.isEnabled() && results.length > 0) {
+        const today = new Date().toISOString().split('T')[0];
+        const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
+        const dailyReport: DailyReport = {
+          date: today,
+          reports: results.map(r => ({
+            workflowName: r.workflowName,
+            locationName: r.locationName,
+            success: r.success,
+            totalRecords: r.totalRecords,
+            processedRecords: r.processedRecords,
+            errorRecords: r.errorRecords,
+            errors: r.errors.map(e => ({ recordId: e.recordId, message: e.message, category: e.category })),
+            duration: r.duration,
+            executedAt: new Date().toISOString(),
+          })),
+          overallSuccess: totalErrors === 0,
+          totalProcessed,
+          totalErrors,
+        };
+        await notifService.sendDailyReport(dailyReport);
+        logger.info('メール通知送信完了');
+      }
+
       process.exit(0);
     } catch (error) {
       logger.error(`手動実行エラー: ${(error as Error).message}`);

@@ -2,27 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NotificationService } from '../notification.service';
 import type { NotificationConfig, DailyReport } from '../../types/notification.types';
 
-// Mock googleapis
-const mockSend = vi.fn().mockResolvedValue({ data: { id: 'test-id' } });
-vi.mock('googleapis', () => ({
-  google: {
-    auth: {
-      GoogleAuth: vi.fn().mockImplementation(function () { return {}; }),
-    },
-    gmail: vi.fn(() => ({
-      users: {
-        messages: {
-          send: mockSend,
-        },
-      },
-    })),
-  },
-}));
+// Mock fetch (Apps Script Web App)
+const mockFetch = vi.fn().mockResolvedValue({
+  json: () => Promise.resolve({ success: true }),
+});
+vi.stubGlobal('fetch', mockFetch);
 
 const mockConfig: NotificationConfig = {
-  enabled: true,
-  serviceAccountKeyPath: './kangotenki.json',
-  from: 'rpa@example.com',
+  webhookUrl: 'https://script.google.com/macros/s/test/exec',
   to: ['admin@example.com'],
 };
 
@@ -77,52 +64,52 @@ describe('NotificationService', () => {
     service = new NotificationService(mockConfig);
   });
 
-  it('isEnabled() returns true when config.enabled is true', () => {
+  it('isEnabled() returns true when webhookUrl and to are set', () => {
     expect(service.isEnabled()).toBe(true);
   });
 
-  it('isEnabled() returns false when config.enabled is false', () => {
-    const disabledService = new NotificationService({ ...mockConfig, enabled: false });
+  it('isEnabled() returns false when webhookUrl/to are empty', () => {
+    const disabledService = new NotificationService({ ...mockConfig, webhookUrl: '', to: [] });
     expect(disabledService.isEnabled()).toBe(false);
   });
 
-  it('sendDailyReport sends email via Gmail API for successful report', async () => {
+  it('sendDailyReport sends via webhook for successful report', async () => {
     await service.sendDailyReport(mockSuccessReport);
 
-    expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend).toHaveBeenCalledWith(
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledWith(
+      mockConfig.webhookUrl,
       expect.objectContaining({
-        userId: 'me',
-        requestBody: expect.objectContaining({
-          raw: expect.any(String),
-        }),
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: expect.any(String),
       })
     );
+    // Verify JSON body contains expected fields
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.to).toBe('admin@example.com');
+    expect(body.subject).toContain('転記処理結果');
+    expect(body.htmlBody).toContain('✅');
   });
 
-  it('sendDailyReport sends email via Gmail API for failed report', async () => {
+  it('sendDailyReport sends via webhook for failed report', async () => {
     await service.sendDailyReport(mockErrorReport);
 
-    expect(mockSend).toHaveBeenCalledTimes(1);
-    expect(mockSend).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: 'me',
-        requestBody: expect.objectContaining({
-          raw: expect.any(String),
-        }),
-      })
-    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.subject).toContain('エラー発生');
+    expect(body.htmlBody).toContain('❌');
   });
 
-  it('sendDailyReport does not send email when disabled', async () => {
-    const disabledService = new NotificationService({ ...mockConfig, enabled: false });
+  it('sendDailyReport does not send when webhookUrl/to empty', async () => {
+    const disabledService = new NotificationService({ ...mockConfig, webhookUrl: '', to: [] });
 
     await disabledService.sendDailyReport(mockSuccessReport);
 
-    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('sendDailyReport does not send email when no records processed', async () => {
+  it('sendDailyReport does not send when no records processed', async () => {
     const emptyReport: DailyReport = {
       ...mockSuccessReport,
       totalProcessed: 0,
@@ -131,11 +118,11 @@ describe('NotificationService', () => {
 
     await service.sendDailyReport(emptyReport);
 
-    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('sendDailyReport does not throw when Gmail API fails', async () => {
-    mockSend.mockRejectedValueOnce(new Error('Gmail API connection failed'));
+  it('sendDailyReport does not throw when webhook fails', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Network error'));
 
     // Should not throw
     await expect(service.sendDailyReport(mockSuccessReport)).resolves.not.toThrow();

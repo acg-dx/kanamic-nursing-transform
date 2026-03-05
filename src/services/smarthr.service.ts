@@ -77,6 +77,45 @@ export class SmartHRService {
   }
 
   /**
+   * 従業員番号 (emp_code) で単一のクルーを検索
+   * SmartHR API は `emp_code` クエリパラメータで完全一致検索をサポート。
+   */
+  async getCrewByEmpCode(empCode: string): Promise<SmartHRCrew | null> {
+    const url = `${this.baseUrl}/crews?per_page=1&page=1&emp_code=${encodeURIComponent(empCode)}`;
+    logger.debug(`SmartHR: emp_code=${empCode} で検索`);
+
+    const response = await fetch(url, { headers: this.headers });
+    if (!response.ok) {
+      throw new Error(`SmartHR API エラー: ${response.status} ${response.statusText}`);
+    }
+
+    const crews = await response.json() as SmartHRCrew[];
+    if (crews.length > 0 && crews[0].emp_code === empCode) {
+      logger.debug(`SmartHR: emp_code=${empCode} → ${crews[0].last_name} ${crews[0].first_name}`);
+      return crews[0];
+    }
+
+    logger.debug(`SmartHR: emp_code=${empCode} に一致するクルーなし`);
+    return null;
+  }
+
+  /**
+   * 複数の従業員番号で一括検索
+   */
+  async getCrewsByEmpCodes(empCodes: string[]): Promise<Map<string, SmartHRCrew>> {
+    const result = new Map<string, SmartHRCrew>();
+    for (const code of empCodes) {
+      try {
+        const crew = await this.getCrewByEmpCode(code);
+        if (crew) result.set(code, crew);
+      } catch (err) {
+        logger.warn(`SmartHR 検索エラー (emp_code=${code}): ${(err as Error).message}`);
+      }
+    }
+    return result;
+  }
+
+  /**
    * 部署一覧を取得
    */
   async getDepartments(): Promise<SmartHRDepartment[]> {
@@ -98,7 +137,7 @@ export class SmartHRService {
     if (!fieldId || !crew.custom_fields) return null;
 
     const field = crew.custom_fields.find(
-      cf => cf.custom_field_template_id === fieldId
+      cf => cf.template?.id === fieldId
     );
     return field?.value ?? null;
   }
@@ -113,17 +152,13 @@ export class SmartHRService {
     if (!fieldId || !crew.custom_fields) return null;
 
     const field = crew.custom_fields.find(
-      cf => cf.custom_field_template_id === fieldId
+      cf => cf.template?.id === fieldId
     );
     if (!field || !field.value) return null;
 
     // オプション型の場合、template.elements から表示名を取得
-    const template = (field as Record<string, unknown>).template as {
-      elements?: Array<{ physical_name: string; name: string }>;
-    } | undefined;
-
-    if (template?.elements) {
-      const option = template.elements.find(e => e.physical_name === field.value);
+    if (field.template?.elements) {
+      const option = field.template.elements.find(e => e.physical_name === field.value);
       if (option) return option.name;
     }
 
@@ -148,7 +183,8 @@ export class SmartHRService {
    */
   getDepartmentName(crew: SmartHRCrew): string {
     if (!crew.departments || crew.departments.length === 0) return '';
-    return crew.departments[0].name || '';
+    const d = crew.departments[0];
+    return (d && d.name) || '';
   }
 
   /**
@@ -208,6 +244,7 @@ export class SmartHRService {
       staffName: businessName || legalName,
       staffNameLegal: legalName,
       staffNameYomi: `${crew.last_name_yomi} ${crew.first_name_yomi}`.trim(),
+      gender: crew.gender || '',
       qualifications: this.getQualifications(crew),
       departmentName: this.getDepartmentName(crew),
       enteredAt: crew.entered_at || '',

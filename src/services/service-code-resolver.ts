@@ -21,9 +21,9 @@ import type { TranscriptionRecord } from '../types/spreadsheet.types';
 export interface ServiceCodeResult {
   /** 保険種別切替フラグ: 1=介護, 2=予防, 3=医療/精神医療 */
   showflag: string;
-  /** サービス種類コード (e.g. "13") — useI5Page=true の場合は空文字 */
+  /** サービス種類コード — HAM radio value の左側 (e.g. "93") */
   servicetype: string;
-  /** サービス項目コード (e.g. "1111") — useI5Page=true の場合は空文字 */
+  /** サービス項目コード — HAM radio value の右側 (e.g. "1001") */
   serviceitem: string;
   /** 介護保険フラグ: "1"=介護保険, "0"=医療保険 */
   longcareflag: string;
@@ -37,6 +37,11 @@ export interface ServiceCodeResult {
   description: string;
   /** 緊急時加算フラグ: k2_2 の urgentflags チェックボックスを ON にする */
   setUrgentFlag: boolean;
+  /**
+   * HAM k2_3a テキストマッチパターン（radio 行テキストに部分一致検索）
+   * servicetype#serviceitem が不一致の場合のフォールバックに使用
+   */
+  textPattern: string;
 }
 
 /**
@@ -74,6 +79,7 @@ export class ServiceCodeResolver {
         useI5Page: true,
         description: '訪看I5（介護リハビリ）— k2_7_1ページで入力',
         setUrgentFlag,
+        textPattern: '',
       };
     }
 
@@ -115,6 +121,13 @@ export class ServiceCodeResolver {
 
   /**
    * 医療保険 (showflag=3) のサービスコード決定
+   *
+   * HAM 実機検証済コード (2026-02-26 姶良):
+   *   93#1001 = 訪問看護基本療養費（Ⅰ・Ⅱ）
+   *   93#1225 = 精神科訪問看護基本療養費（Ⅰ・Ⅲ）
+   *
+   * textPattern で行テキスト部分一致のフォールバックを併用し、
+   * コードが事業所や時期で変わっても対応可能にする。
    */
   private resolveIryo(
     serviceType2: string,
@@ -126,28 +139,30 @@ export class ServiceCodeResolver {
     const base = { showflag: '3', useI5Page: false, ...flags };
 
     if (serviceType2 === '緊急') {
-      return { ...base, servicetype: '13', serviceitem: '1111', description: '訪看I2（緊急時加算あり）' };
+      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（緊急時加算あり）' };
     }
 
     if (serviceType2 === 'リハビリ') {
       if (hasMultipleVisit) {
-        return { ...base, servicetype: '13', serviceitem: '5114', description: '訪看I5複数名訪問加算' };
+        return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（理学療法等・複数名）' };
       }
-      return { ...base, servicetype: '13', serviceitem: '5111', description: '訪看I5（理学療法等）' };
+      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（理学療法等）' };
     }
 
     // 通常
     if (hasAccompany) {
-      return { ...base, servicetype: '13', serviceitem: '1121', description: '訪看I2准（同行）' };
+      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（同行）' };
     }
     if (hasMultipleVisit || hasAccompanyClerk) {
-      return { ...base, servicetype: '13', serviceitem: '1114', description: '訪看I2複数名訪問加算(看11)' };
+      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（複数名）' };
     }
-    return { ...base, servicetype: '13', serviceitem: '1111', description: '訪看I2' };
+    return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（Ⅰ・Ⅱ）' };
   }
 
   /**
    * 精神医療 (showflag=3) のサービスコード決定
+   *
+   * HAM 実機検証済コード: 93#1225 = 精神科訪問看護基本療養費（Ⅰ・Ⅲ）
    */
   private resolveSeishin(
     serviceType2: string,
@@ -158,21 +173,30 @@ export class ServiceCodeResolver {
     const base = { showflag: '3', useI5Page: false, ...flags };
 
     if (serviceType2 === '緊急') {
-      return { ...base, servicetype: '13', serviceitem: '7111', description: '精神訪問看護基本療養費I（緊急時加算あり）' };
+      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（緊急時加算あり）' };
     }
 
-    // 通常
     if (hasAccompany) {
-      return { ...base, servicetype: '13', serviceitem: '7121', description: '精神訪問看護基本療養費I准（同行）' };
+      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（同行）' };
     }
     if (hasMultipleVisit) {
-      return { ...base, servicetype: '13', serviceitem: '7114', description: '精神I複数名訪問加算' };
+      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（複数名）' };
     }
-    return { ...base, servicetype: '13', serviceitem: '7111', description: '精神訪問看護基本療養費I' };
+    return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）' };
   }
 
   /**
    * 介護保険 (showflag=1) のサービスコード決定（リハビリ以外）
+   *
+   * HAM 実機検証済コード (2026-02-27 姶良):
+   *   13#1211 = 訪看Ⅰ３（看護師）
+   *   13#1221 = 訪看Ⅰ３・准（准看護師）
+   *   13#1217 = 訪看Ⅰ３・複１１（複数名・看護師副）
+   *   13#1250 = 訪看Ⅰ３・複２１（複数名・他副）
+   *
+   * ※スタッフ資格による 訪看Ⅰ３ / 訪看Ⅰ３・准 の振り分けは
+   *   将来の資格判定機能で対応予定。現時点では 訪看Ⅰ３（看護師）をデフォルトとし、
+   *   textPattern で最短一致させる。
    */
   private resolveKaigo(
     serviceType2: string,
@@ -184,17 +208,25 @@ export class ServiceCodeResolver {
     const base = { showflag: '1', useI5Page: false, ...flags };
 
     if (serviceType2 === '緊急') {
-      return { ...base, servicetype: '13', serviceitem: '1111', description: '訪問看護I（緊急時加算あり）' };
+      // 緊急時加算は k2_2 の urgentflags チェックで対応。サービスコード自体は通常と同じ。
+      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（緊急時加算あり）' };
     }
 
-    // 通常
     if (hasAccompany) {
-      return { ...base, servicetype: '13', serviceitem: '1121', description: '訪問看護I准（同行）' };
+      // 同行 → 通常と同じコード（同行は転記対象外の場合もあるが、フォールバック）
+      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（同行）' };
     }
-    if (hasMultipleVisit || hasAccompanyClerk) {
-      return { ...base, servicetype: '13', serviceitem: '1114', description: '訪看I複数名訪問加算(看11)' };
+    if (hasMultipleVisit) {
+      // 複数名訪問: 副が看護師等 → 複１１、副が他 → 複２１
+      // 現時点ではデフォルト複１１。textPattern で最短一致フォールバック。
+      return { ...base, servicetype: '13', serviceitem: '1217', textPattern: '訪看Ⅰ３・複１１', description: '訪看Ⅰ３・複１１（複数名）' };
     }
-    return { ...base, servicetype: '13', serviceitem: '1111', description: '訪問看護I' };
+    if (hasAccompanyClerk) {
+      // 同行事務員（複数名(二)）→ 複２１
+      return { ...base, servicetype: '13', serviceitem: '1250', textPattern: '訪看Ⅰ３・複２１', description: '訪看Ⅰ３・複２１（複数名・他）' };
+    }
+    // 通常: 看護師 → 訪看Ⅰ３ (13#1211)
+    return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３' };
   }
 
   /**

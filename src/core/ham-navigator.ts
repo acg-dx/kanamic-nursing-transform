@@ -141,6 +141,13 @@ export class HamNavigator {
       const form = document.forms[0];
       if (!form) throw new Error('form not found');
 
+      // HAM 標準フォームフィールドの存在チェック
+      // syserror ページやセッション切れページの form には doAction が存在しない
+      if (!form.doAction) {
+        const bodyText = document.body?.innerText?.substring(0, 200) || '';
+        throw new Error(`form.doAction が存在しません（異常ページの可能性）。action=${opts.action}, body=${bodyText}`);
+      }
+
       // lockCheck 設定
       if (opts.setLockCheck && form.lockCheck) {
         form.lockCheck.value = '1';
@@ -335,17 +342,40 @@ export class HamNavigator {
       const exactValue = `${type}#${item}`;
       let target = radios.find(r => r.value === exactValue);
 
-      // 方法2: テキストパターンマッチ
+      // 方法2: テキストパターンマッチ（改善版）
+      // 「減算」「超過」「加算」等の調整項目を避け、基本サービスを優先する。
+      // 複数候補がある場合は行テキストが最短のもの（＝最も基本的なサービス）を選ぶ。
       if (!target && pattern) {
+        const adjustmentKeywords = ['減算', '超過', '加算', '移行'];
+        let bestCandidate: HTMLInputElement | null = null;
+        let bestLength = Infinity;
         for (const r of radios) {
           if (!r.value) continue;
           const tr = r.closest('tr');
           const rowText = tr?.textContent?.trim() || '';
-          if (rowText.includes(pattern)) {
-            target = r;
-            break;
+          if (!rowText.includes(pattern)) continue;
+          // 調整項目は後回し
+          const isAdjustment = adjustmentKeywords.some(kw => rowText.includes(kw));
+          if (isAdjustment) continue;
+          // 最短テキスト = 最も基本的なサービス
+          if (rowText.length < bestLength) {
+            bestCandidate = r;
+            bestLength = rowText.length;
           }
         }
+        // 基本サービスが見つからない場合は調整項目もフォールバック対象
+        if (!bestCandidate) {
+          for (const r of radios) {
+            if (!r.value) continue;
+            const tr = r.closest('tr');
+            const rowText = tr?.textContent?.trim() || '';
+            if (rowText.includes(pattern)) {
+              bestCandidate = r;
+              break;
+            }
+          }
+        }
+        target = bestCandidate ?? undefined;
       }
 
       // 方法3: 最初の有効な radio を選択（フォールバック）
@@ -366,13 +396,13 @@ export class HamNavigator {
       // radio value から servicetype / serviceitem を分解して hidden fields に設定
       const parts = target.value.split('#');
       if (parts.length === 2) {
-        form.servicetype.value = parts[0];
-        form.serviceitem.value = parts[1];
+        if (form.servicetype) form.servicetype.value = parts[0];
+        if (form.serviceitem) form.serviceitem.value = parts[1];
       }
 
       // servicepoint 取得
       const obj = document.getElementsByName(target.value);
-      if (obj.length > 0) {
+      if (obj.length > 0 && form.servicepoint) {
         form.servicepoint.value = (obj.item(0) as HTMLInputElement).value;
       }
 
@@ -449,14 +479,42 @@ export class HamNavigator {
   }
 
   /**
-   * 現在のフレーム URL を取得
+   * 現在のフレーム URL + DOM 内容を検証して pageId を取得
+   *
+   * URL だけでは不十分 — HAM がエラー応答を返した場合、frame URL に
+   * 旧 pageId が残るが DOM 内容は異常ページになっている。
+   * k2_1 の場合は searchdate select の存在も確認する。
    */
   async getCurrentPageId(): Promise<string | null> {
     try {
       const frame = await this.getMainFrame();
       const url = frame.url();
       const match = url.match(/pageId=([\w-]+)/);
-      return match ? match[1] : null;
+      if (!match) return null;
+
+      const pageId = match[1];
+
+      // k2_1 の場合は DOM 内容も検証（searchdate select が存在するか）
+      if (pageId === 'k2_1') {
+        const hasSearchDate = await frame.evaluate(() =>
+          !!document.querySelector('select[name="searchdate"]')
+        ).catch(() => false);
+        if (!hasSearchDate) {
+          logger.warn(`getCurrentPageId: URL は k2_1 だが searchdate が存在しません — 異常ページ`);
+          return null;
+        }
+      }
+
+      // 汎用チェック: form が存在するか（syserror ページ等を除外）
+      if (pageId !== 't1-2') {
+        const hasForm = await frame.evaluate(() => !!document.forms[0]).catch(() => false);
+        if (!hasForm) {
+          logger.warn(`getCurrentPageId: URL は ${pageId} だが form が存在しません`);
+          return null;
+        }
+      }
+
+      return pageId;
     } catch {
       return null;
     }

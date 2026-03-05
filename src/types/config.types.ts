@@ -15,6 +15,14 @@ export interface AppConfig {
     locations: SheetLocation[];
     /** 同一建物管理用の連携スプレッドシートID */
     buildingMgmtSheetId: string;
+    /** 共同生活援助スプレッドシートID（鹿児島） */
+    ghSheetIdKagoshima: string;
+    /** 共同生活援助スプレッドシートID（福岡） */
+    ghSheetIdFukuoka: string;
+  };
+  kintone: {
+    baseUrl: string;
+    app197Token: string;
   };
   aiHealing: {
     apiKey: string;

@@ -51,6 +51,12 @@ export function loadConfig(): AppConfig {
       serviceAccountKeyPath: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || './kangotenki.json',
       locations: getActiveLocations(),
       buildingMgmtSheetId: BUILDING_MGMT_SHEET_ID,
+      ghSheetIdKagoshima: process.env.GH_SHEET_ID_KAGOSHIMA || '',
+      ghSheetIdFukuoka: process.env.GH_SHEET_ID_FUKUOKA || '',
+    },
+    kintone: {
+      baseUrl: process.env.KINTONE_BASE_URL || '',
+      app197Token: process.env.KINTONE_APP_197_TOKEN || '',
     },
     aiHealing: {
       apiKey: process.env.OPENAI_API_KEY || '',
@@ -58,7 +64,7 @@ export function loadConfig(): AppConfig {
       maxAttempts: parseInt(process.env.AI_HEALING_MAX_ATTEMPTS || '3', 10),
     },
     scheduling: {
-      transcriptionCron: process.env.TRANSCRIPTION_CRON || '0 7 * * *',
+      transcriptionCron: process.env.TRANSCRIPTION_CRON || '0 13 * * *',
       buildingMgmtCron: process.env.BUILDING_MGMT_CRON || '0 6 3 * *',
     },
     logging: {

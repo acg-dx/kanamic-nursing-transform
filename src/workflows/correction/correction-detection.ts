@@ -40,6 +40,7 @@ export class CorrectionDetector {
       correctionId,
       recordId: record.recordId,
       patientName: record.patientName,
+      visitDate: record.visitDate,
       correctedAt: new Date().toISOString(),
       changeDetail,
       status: '未処理',

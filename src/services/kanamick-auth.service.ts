@@ -74,6 +74,45 @@ export class KanamickAuthService {
   }
 
   /**
+   * TRITRUS ポータルにのみログイン（HAM は開かない）
+   *
+   * 同一建物管理など TRITRUS ポータル上で完結する操作に使用。
+   * HAM タブを開かないため高速。
+   */
+  async loginTritrusOnly(): Promise<Page> {
+    if (!this.context) throw new Error('BrowserContext が未設定です');
+
+    await withRetry(
+      async () => {
+        logger.info('TRITRUS ログイン開始（ポータルのみ）...');
+        const page = await this.ensurePage();
+
+        await page.goto(this.config.url, { waitUntil: 'networkidle', timeout: 30000 });
+        logger.debug(`TRITRUS ポータル表示: ${page.url()}`);
+
+        const isAlreadyOnPortal = page.url().includes('portal.kanamic.net/tritrus/index');
+        if (isAlreadyOnPortal) {
+          logger.info('既にポータルにログイン済み — ログインステップをスキップ');
+        } else {
+          await page.fill('#josso_username', this.config.username);
+          await page.fill('#josso_password', this.config.password);
+          await page.click('input.submit-button[type="button"]');
+          await page.waitForLoadState('networkidle', { timeout: 15000 });
+          await this.sleep(2000);
+          logger.debug(`ログイン完了: ${page.url()}`);
+        }
+
+        this.isLoggedIn = true;
+        logger.info('TRITRUS ポータルログイン完了');
+      },
+      'TRITRUS ログイン（ポータルのみ）',
+      { maxAttempts: 2, baseDelay: 3000 }
+    );
+
+    return this.page;
+  }
+
+  /**
    * TRITRUS にログインし、HAM を新しいタブで開く
    */
   async login(): Promise<HamNavigator> {
@@ -94,13 +133,19 @@ export class KanamickAuthService {
         await page.goto(this.config.url, { waitUntil: 'networkidle', timeout: 30000 });
         logger.debug(`TRITRUS ポータル表示: ${page.url()}`);
 
-        // JOSSO ログインフォーム — 確定セレクタ (2026-02-26 検証済)
-        await page.fill('#josso_username', this.config.username);
-        await page.fill('#josso_password', this.config.password);
-        await page.click('input.submit-button[type="button"]');
-        await page.waitForLoadState('networkidle', { timeout: 15000 });
-        await this.sleep(2000);
-        logger.debug(`ログイン完了: ${page.url()}`);
+        // リトライ時、既にポータルにログイン済みならログインをスキップ
+        const isAlreadyOnPortal = page.url().includes('portal.kanamic.net/tritrus/index');
+        if (isAlreadyOnPortal) {
+          logger.info('既にポータルにログイン済み — ログインステップをスキップ');
+        } else {
+          // JOSSO ログインフォーム — 確定セレクタ (2026-02-26 検証済)
+          await page.fill('#josso_username', this.config.username);
+          await page.fill('#josso_password', this.config.password);
+          await page.click('input.submit-button[type="button"]');
+          await page.waitForLoadState('networkidle', { timeout: 15000 });
+          await this.sleep(2000);
+          logger.debug(`ログイン完了: ${page.url()}`);
+        }
 
         // === Step 2: マイページから goCicHam.jsp リンクを検索 ===
         // k=6 → HAM直接アクセス (target=new_win_1)
@@ -125,7 +170,7 @@ export class KanamickAuthService {
           const searchBtn = await page.$('button.btn-search');
           if (searchBtn) {
             await searchBtn.click();
-            await page.waitForLoadState('networkidle', { timeout: 10000 });
+            await page.waitForLoadState('networkidle', { timeout: 30000 });
             await this.sleep(2000);
           }
           hamLink = hParam
@@ -275,16 +320,166 @@ export class KanamickAuthService {
   }
 
   /**
-   * HAM メインメニューへ戻る (topFrame の「戻る」ボタン or act_back)
+   * HAM メインメニューから 8-1 スケジュールデータ出力へ遷移
+   * メニュー階層: t1-2 → k1_1（訪問看護）→ k11_1（8-1 スケジュールデータ出力）
+   */
+  async navigateToScheduleDataExport(): Promise<void> {
+    const nav = this.navigator;
+    // Step 1: 訪問看護業務ガイドへ
+    await this.navigateToBusinessGuide();
+    // Step 2: 8-1 スケジュールデータ出力へ
+    await nav.submitForm({
+      action: 'act_k11_1',
+      waitForPageId: 'k11_1',
+      timeout: 30000,
+    });
+    logger.debug('8-1 スケジュールデータ出力に遷移');
+  }
+
+  /**
+   * HAM メインメニュー (t1-2) へ戻る
+   *
+   * HAM の画面階層は t1-2 → k1_1 → k2_1 → k2_2 → ... と深くなるため、
+   * 現在位置に関わらず t1-2 に到達するまで act_back を繰り返す。
+   * 最大 MAX_BACK_STEPS 回で打ち切り（無限ループ防止）。
    */
   async navigateToMainMenu(): Promise<void> {
     const nav = this.navigator;
-    await nav.submitForm({
-      action: 'act_back',
-    });
-    // メインメニューページの待機
-    await this.sleep(1000);
-    logger.debug('メインメニューに遷移');
+    const MAX_BACK_STEPS = 8;
+    let prevPageId = '';
+
+    for (let i = 0; i < MAX_BACK_STEPS; i++) {
+      const pageId = await nav.getCurrentPageId();
+      logger.debug(`navigateToMainMenu: step ${i + 1}, pageId=${pageId}`);
+
+      // t1-2 = メインメニュー到達
+      if (pageId === 't1-2') {
+        logger.debug('メインメニューに遷移完了');
+        return;
+      }
+
+      // pageId が取得できない場合（syserror 等）はフレーム URL で判定
+      if (!pageId) {
+        try {
+          const frame = await nav.getMainFrame();
+          const url = frame.url();
+          if (url.includes('t1-2') || url.includes('hamfromout')) {
+            logger.debug('メインメニューに遷移完了（URL判定）');
+            return;
+          }
+        } catch {
+          // フレームアクセス失敗 — 続行
+        }
+      }
+
+      // k2_1, k1_1 は act_back が効かないため、topFrame の「総合メニューへ」で直接戻る
+      if (pageId === 'k2_1' || pageId === 'k1_1' || (pageId && pageId === prevPageId)) {
+        logger.debug(`navigateToMainMenu: ${pageId} → topFrame 総合メニューへ`);
+        const clicked = await this.clickMainMenuLink(nav);
+        if (clicked) {
+          await this.sleep(2000);
+          prevPageId = pageId || '';
+          continue;
+        }
+      }
+
+      prevPageId = pageId || '';
+
+      try {
+        await nav.submitForm({ action: 'act_back' });
+        await this.sleep(1500);
+      } catch (err) {
+        logger.warn(`navigateToMainMenu: act_back 失敗 (step ${i + 1}): ${(err as Error).message}`);
+        // act_back 失敗時は topFrame 総合メニューへを試行
+        await this.clickMainMenuLink(nav);
+        await this.sleep(1500);
+      }
+    }
+
+    // 到達確認 — 未到達の場合は kanamicmain フレームを直接リロードして強制復帰
+    const finalPageId = await nav.getCurrentPageId();
+    if (finalPageId && finalPageId !== 't1-2') {
+      logger.warn(`navigateToMainMenu: ${MAX_BACK_STEPS}回後も t1-2 に到達せず (pageId=${finalPageId})。強制復帰を試行`);
+      await this.forceNavigateToMainMenu(nav);
+    } else if (!finalPageId) {
+      logger.warn('navigateToMainMenu: pageId 取得不可。強制復帰を試行');
+      await this.forceNavigateToMainMenu(nav);
+    } else {
+      logger.debug('メインメニューに遷移完了');
+    }
+  }
+
+  /**
+   * kanamicmain フレームを直接 t1-2 の URL にナビゲートして強制復帰。
+   * 通常の act_back / 総合メニューへ が全て失敗した場合の最終手段。
+   */
+  private async forceNavigateToMainMenu(nav: HamNavigator): Promise<void> {
+    try {
+      const hamPage = nav.hamPage;
+
+      // 方法1: kanamicmain フレームの URL を t1-2Action.go に直接書き換え
+      const kanamicmain = hamPage.frame('kanamicmain');
+      if (kanamicmain) {
+        const currentUrl = kanamicmain.url();
+        // t1-2Action.go の URL を構築（既存 URL のベースを利用）
+        const baseMatch = currentUrl.match(/(https?:\/\/[^/]+\/kanamic\/)/);
+        if (baseMatch) {
+          const t12Url = `${baseMatch[1]}ham/t1-2Action.go`;
+          logger.debug(`forceNavigateToMainMenu: kanamicmain → ${t12Url}`);
+          await hamPage.evaluate((url) => {
+            const frame = document.querySelector('frame[name="kanamicmain"]') as HTMLFrameElement;
+            if (frame) frame.src = url;
+          }, t12Url);
+          await this.sleep(3000);
+          await hamPage.waitForLoadState('load').catch(() => {});
+          const pageId = await nav.getCurrentPageId();
+          if (pageId === 't1-2') {
+            logger.info('forceNavigateToMainMenu: 強制復帰成功');
+            return;
+          }
+        }
+      }
+
+      // 方法2: HAM ページ自体をリロード（hamfromout.go → 自動的に t1-2）
+      logger.debug('forceNavigateToMainMenu: HAM ページリロード');
+      await hamPage.reload({ waitUntil: 'load', timeout: 30000 });
+      await this.sleep(3000);
+      await nav.closeVenoboxPopup();
+      const pageId = await nav.getCurrentPageId();
+      if (pageId === 't1-2') {
+        logger.info('forceNavigateToMainMenu: リロードで復帰成功');
+        return;
+      }
+
+      logger.error('forceNavigateToMainMenu: 強制復帰失敗');
+    } catch (err) {
+      logger.error(`forceNavigateToMainMenu エラー: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * topFrame の「総合メニューへ」ボタン/リンクをクリック
+   * k2_1, k2_2 等の画面ヘッダーに表示される汎用メニューボタン
+   */
+  private async clickMainMenuLink(nav: HamNavigator): Promise<boolean> {
+    const hamPage = nav.hamPage;
+    for (const frame of hamPage.frames()) {
+      try {
+        // <a> or <input> with text 総合メニューへ
+        const link = await frame.$('a:has-text("総合メニューへ")');
+        if (link) {
+          await link.click();
+          return true;
+        }
+        const btn = await frame.$('input[value="総合メニューへ"]');
+        if (btn) {
+          await btn.click();
+          return true;
+        }
+      } catch { /* ignore */ }
+    }
+    logger.warn('「総合メニューへ」が見つかりません');
+    return false;
   }
 
   private sleep(ms: number): Promise<void> {

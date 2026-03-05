@@ -1,9 +1,6 @@
 export interface NotificationConfig {
-  enabled: boolean;
-  /** Google Service Account キーファイルパス */
-  serviceAccountKeyPath: string;
-  /** 送信元メールアドレス（Service Account に委任されたユーザー） */
-  from: string;
+  /** Google Apps Script Web App URL */
+  webhookUrl: string;
   /** 送信先メールアドレス */
   to: string[];
 }

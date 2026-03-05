@@ -74,10 +74,10 @@ async function main() {
       console.log(`     カスタムフィールド数: ${crew.custom_fields.length}`);
       // 資格フィールドの生データ確認
       const qualFields = crew.custom_fields.filter(cf =>
-        cf.custom_field_template_id && cf.value
+        cf.template?.id && cf.value
       ).slice(0, 3);
       for (const f of qualFields) {
-        console.log(`       - template_id: ${f.custom_field_template_id}, value: ${f.value}`);
+        console.log(`       - template_id: ${f.template.id}, value: ${f.value}`);
       }
     }
     console.log();
