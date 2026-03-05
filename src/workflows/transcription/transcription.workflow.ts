@@ -22,15 +22,18 @@
 import { BaseWorkflow } from '../base-workflow';
 import { logger } from '../../core/logger';
 import { withRetry } from '../../core/retry-manager';
+import { normalizeCjkName, CJK_VARIANT_MAP_SERIALIZABLE } from '../../core/cjk-normalize';
 import { ServiceCodeResolver } from '../../services/service-code-resolver';
 import { PatientMasterService } from '../../services/patient-master.service';
 import type { ServiceCodeResult } from '../../services/service-code-resolver';
-import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart } from '../../services/time-utils';
+import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart, calcDurationMinutes } from '../../services/time-utils';
 import type { Frame } from 'playwright';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError, TranscriptionStatus } from '../../types/workflow.types';
 import type { TranscriptionRecord } from '../../types/spreadsheet.types';
 import type { SheetLocation } from '../../types/config.types';
+import type { SmartHRService } from '../../services/smarthr.service';
+import type { StaffSyncService } from '../../workflows/staff-sync/staff-sync.workflow';
 
 const WORKFLOW_NAME = 'transcription';
 
@@ -38,6 +41,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   private resolver = new ServiceCodeResolver();
   private patientMaster: PatientMasterService | null = null;
   private staffQualifications = new Map<string, string[]>();
+  private smarthr: SmartHRService | null = null;
+  private staffSync: StaffSyncService | null = null;
+  private hamRegistrationState = new Map<string, boolean>();
 
   /** CSV利用者マスタを設定 */
   setPatientMaster(master: PatientMasterService): void {
@@ -49,13 +55,19 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     this.staffQualifications = qualMap;
   }
 
+  /** SmartHR + StaffSync を設定（転記前スタッフ自動補登用） */
+  setStaffAutoRegister(smarthr: SmartHRService, staffSync: StaffSyncService): void {
+    this.smarthr = smarthr;
+    this.staffSync = staffSync;
+  }
+
   async run(context: WorkflowContext): Promise<WorkflowResult[]> {
     const locations = context.locations || [];
     const results: WorkflowResult[] = [];
 
     for (const location of locations) {
       const result = await this.executeWithTiming(() =>
-        this.processLocation(location, context.dryRun)
+        this.processLocation(location, context.dryRun, context.tab)
       );
       results.push(result);
     }
@@ -63,13 +75,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     return results;
   }
 
-  private async processLocation(location: SheetLocation, dryRun: boolean): Promise<WorkflowResult> {
-    logger.info(`転記処理開始: ${location.name}`);
+  private async processLocation(location: SheetLocation, dryRun: boolean, tab?: string): Promise<WorkflowResult> {
+    const tabLabel = tab || '当月';
+    logger.info(`転記処理開始: ${location.name} (${tabLabel})`);
     const errors: WorkflowError[] = [];
     let processedRecords = 0;
 
-    const records = await this.sheets.getTranscriptionRecords(location.sheetId);
-    await this.sheets.formatTranscriptionColumns(location.sheetId);
+    const records = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
+    await this.sheets.formatTranscriptionColumns(location.sheetId, tab);
     const targets = records.filter(r => this.isTranscriptionTarget(r));
 
     logger.info(`${location.name}: 対象レコード ${targets.length}/${records.length}件`);
@@ -90,7 +103,50 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // HAM にログイン
     const nav = await this.auth.ensureLoggedIn();
 
-    for (const record of targets) {
+    // === スタッフ事前チェック＋自動補登 ===
+    let unregisteredStaff = new Set<string>();
+    try {
+      unregisteredStaff = await this.ensureStaffRegistered(nav, targets);
+    } catch (err) {
+      logger.error(`スタッフ事前チェックエラー（転記は続行）: ${(err as Error).message}`);
+      // エラー後にメインメニューに復帰
+      try { await this.auth.navigateToMainMenu(); } catch { /* ignore */ }
+    }
+
+    // 補登失敗のスタッフのレコードを事前にエラーマーク
+    if (unregisteredStaff.size > 0) {
+      for (const record of targets) {
+        if (unregisteredStaff.has(record.staffName)) {
+          await this.sheets.updateTranscriptionStatus(
+            location.sheetId,
+            record.rowIndex,
+            'エラー：マスタ不備',
+            `スタッフ「${record.staffName}」がHAMに未登録です（自動補登失敗）`,
+            tab,
+          ).catch(e => logger.error(`ステータス更新失敗: ${(e as Error).message}`));
+
+          errors.push({
+            recordId: record.recordId,
+            message: `スタッフ「${record.staffName}」がHAMに未登録`,
+            category: 'master',
+            recoverable: false,
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    // 未登録スタッフのレコードを除外して転記
+    const executableTargets = unregisteredStaff.size > 0
+      ? targets.filter(r => !unregisteredStaff.has(r.staffName))
+      : targets;
+
+    logger.info(`転記実行対象: ${executableTargets.length}件${unregisteredStaff.size > 0 ? ` (スタッフ未登録で除外: ${targets.length - executableTargets.length}件)` : ''}`);
+
+    const MAX_CONSECUTIVE_ERRORS = 3;
+    let consecutiveErrors = 0;
+
+    for (const record of executableTargets) {
       if (dryRun) {
         logger.info(`[DRY RUN] 転記スキップ: ${record.recordId} - ${record.patientName}`);
         processedRecords++;
@@ -99,11 +155,25 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
       try {
         await withRetry(
-          () => this.processRecord(record, nav, location.sheetId),
+          () => this.processRecord(record, nav, location.sheetId, tab),
           `転記[${record.recordId}]`,
-          { maxAttempts: 2, baseDelay: 3000, maxDelay: 15000, backoffMultiplier: 2 }
+          {
+            maxAttempts: 2,
+            baseDelay: 3000,
+            maxDelay: 15000,
+            backoffMultiplier: 2,
+            onRetry: async () => {
+              // エラー後のリトライ: メインメニューまで完全復帰してから k2_1 まで再遷移
+              // getCurrentPageId の結果に頼らず、確実に t1-2 → k1_1 → k2_1 を通る
+              logger.info('ページ復旧: メインメニュー → 利用者検索まで再遷移');
+              await this.auth.navigateToMainMenu();
+              await this.auth.navigateToBusinessGuide();
+              await this.auth.navigateToUserSearch();
+            },
+          }
         );
         processedRecords++;
+        consecutiveErrors = 0; // 成功でリセット
       } catch (error) {
         const err = error as Error;
         const { status, category, detail } = TranscriptionWorkflow.classifyError(err);
@@ -112,7 +182,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           location.sheetId,
           record.rowIndex,
           status,
-          detail
+          detail,
+          tab,
         ).catch(e => logger.error(`ステータス更新失敗: ${(e as Error).message}`));
 
         errors.push({
@@ -123,6 +194,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           timestamp: new Date().toISOString(),
         });
         logger.error(`転記エラー [${record.recordId}]: ${err.message}`);
+
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          logger.error(`連続${MAX_CONSECUTIVE_ERRORS}件エラー — システム障害と判断し処理を中止します`);
+          break;
+        }
 
         // エラー後にメインメニューへ復帰を試みる
         await this.tryRecoverToMainMenu(nav);
@@ -150,6 +227,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 会議決定: "2","3","4" のみ転記対象
     const cs = record.completionStatus;
     if (cs === '' || cs === '1') return false;
+
+    // N列「重複」かつ P列が空欄 → スキップ（同行事務員未設定の重複レコード）
+    if (record.accompanyCheck.includes('重複') && !record.accompanyClerkCheck.trim()) return false;
+    // O列「緊急時支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
+    if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
+
     if (record.transcriptionFlag === '転記済み') return false;
     if (record.transcriptionFlag === '') return true;
     if (record.transcriptionFlag === 'エラー：システム') return true;
@@ -165,8 +248,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     record: TranscriptionRecord,
     nav: HamNavigator,
     sheetId: string,
+    tab?: string,
   ): Promise<void> {
     logger.info(`転記開始: ${record.recordId} - ${record.patientName} (${record.visitDate})`);
+
+    // Check if HAM registration is already complete from a previous retry attempt
+    const hamAlreadyComplete = this.hamRegistrationState.get(record.recordId) || false;
 
     // サービスコード決定
     const codeResult = this.resolver.resolve(record);
@@ -174,17 +261,28 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // 介護+リハビリ → k2_7_1 フロー
     if (codeResult.useI5Page) {
-      await this.processI5Record(record, nav, sheetId, codeResult);
+      await this.processI5Record(record, nav, sheetId, codeResult, tab);
       return;
     }
 
-    // === Step 1: メインメニュー → 業務ガイド (t1-2 → k1_1) ===
-    await this.auth.navigateToBusinessGuide();
-    logger.debug('Step 1: 業務ガイドに遷移');
-
-    // === Step 2: 業務ガイド → 利用者検索 (k1_1 → k2_1) ===
-    await this.auth.navigateToUserSearch();
-    logger.debug('Step 2: 利用者検索に遷移');
+    // === Step 1-2: k2_1 に遷移（既に k2_1 にいればスキップ） ===
+    const currentPageId = await nav.getCurrentPageId();
+    if (currentPageId === 'k2_1') {
+      logger.debug('Step 1-2: 既に k2_1（利用者検索）にいるためスキップ');
+    } else if (currentPageId === 'k2_2') {
+      // k2_2 にいる場合（リトライ等）→「戻る」で k2_1 に戻る
+      logger.debug('Step 1-2: k2_2 にいるため「戻る」で k2_1 へ');
+      await this.clickBackButtonOnK2_2(nav);
+    } else {
+      // その他のページ → メインメニュー経由で k2_1 へ
+      if (currentPageId && currentPageId !== 't1-2') {
+        await this.auth.navigateToMainMenu();
+      }
+      await this.auth.navigateToBusinessGuide();
+      logger.debug('Step 1: 業務ガイドに遷移');
+      await this.auth.navigateToUserSearch();
+      logger.debug('Step 2: 利用者検索に遷移');
+    }
 
     // === Step 3: k2_1 で患者検索 ===
     const monthStart = toHamMonthStart(record.visitDate);
@@ -237,7 +335,28 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     const visitDateHam = toHamDate(record.visitDate);
 
-    // === Step 4.5: 修正レコードの場合 → 既存スケジュール先行削除 ===
+    // === Early exit if HAM registration already complete from retry ===
+    if (hamAlreadyComplete) {
+      logger.warn(`HAM登録済み (リトライ時スキップ): ${record.recordId} — 転記ステータス更新へ直行`);
+      await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
+      await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
+      await this.clickBackButtonOnK2_2(nav);
+      return;
+    }
+
+    // === Step 4.5a: 重複チェック — 同一日付+時刻のエントリが既にあればスキップ ===
+    if (record.transcriptionFlag !== '修正あり') {
+      const isDuplicate = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      if (isDuplicate) {
+        await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
+        await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
+        logger.info(`重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
+        await this.clickBackButtonOnK2_2(nav);
+        return;
+      }
+    }
+
+    // === Step 4.5b: 修正レコードの場合 → 既存スケジュール先行削除 ===
     if (record.transcriptionFlag === '修正あり') {
       logger.info(`修正レコード検出: ${record.recordId} — 既存スケジュールを削除します`);
       const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime);
@@ -319,14 +438,23 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // === Step 8: k2_3b で決定 → k2_2 に戻る ===
     await nav.submitForm({ action: 'act_do', waitForPageId: 'k2_2' });
-    await this.sleep(1500);
+    await this.sleep(3000);
     logger.debug('Step 8: スケジュール確定、月間スケジュールに戻る');
+    this.hamRegistrationState.set(record.recordId, true);
 
     // === Step 9: k2_2 で新規行の配置ボタン → k2_2f ===
     // 配置ボタン onclick: submitTargetFormEx(this.form, 'act_modify', assignid, 'XXX')
-    const assignId = await this.findNewAssignId(nav, visitDateHam);
+    // 新規行が表示されるまでリトライ（k2_2 再読み込みに時間がかかる場合がある）
+    let assignId: string | null = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      assignId = await this.findNewAssignId(nav, visitDateHam);
+      if (assignId) break;
+      logger.debug(`Step 9: 新規行待ち (${attempt + 1}/10)...`);
+      await this.sleep(2000);
+    }
+
     if (!assignId) {
-      throw new Error(`新規スケジュール行が見つかりません (日付=${visitDateHam})`);
+      throw new Error(`新規スケジュール行が見つかりません (日付=${visitDateHam})。配置ボタンが存在しない場合、サービスコードの選択が間違っている可能性があります。`);
     }
 
     const k2_2FrameForAssign = await nav.getMainFrame('k2_2');
@@ -387,12 +515,20 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     // Stage 3: スタッフ検索 + HAM choice() 呼び出し
-    const staffSearchName = record.staffName.replace(/[\s\u3000]+/g, '');
-    const choiceResult = await staffFrame.evaluate((searchName: string) => {
+    // CJK 異体字正規化: NFKC + 旧字体→新字体（眞→真, 﨑→崎 等）
+    const staffSearchName = normalizeCjkName(record.staffName);
+    const choiceResult = await staffFrame.evaluate((args: { searchName: string; variantMap: [string, string][] }) => {
+      function normCjk(s: string): string {
+        let r = s.normalize('NFKC');
+        for (const [old, rep] of args.variantMap) {
+          if (r.includes(old)) r = r.replaceAll(old, rep);
+        }
+        return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
+      }
       const rows = Array.from(document.querySelectorAll('tr'));
       for (const row of rows) {
-        const rowText = (row.textContent || '').replace(/[\s\u3000\u00a0]+/g, '');
-        if (!rowText.includes(searchName)) continue;
+        const rowText = normCjk(row.textContent || '');
+        if (!rowText.includes(args.searchName)) continue;
         const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
         if (!selectBtn || selectBtn.disabled) continue;
         const onclick = selectBtn.getAttribute('onclick') || '';
@@ -409,7 +545,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         return { found: true, helperId: m[1], staffName: m[2] };
       }
       return { found: false, helperId: '', staffName: '' };
-    }, staffSearchName);
+    }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
     if (!choiceResult.found) {
       throw new Error(`スタッフ「${record.staffName}」が見つかりません（HAMに登録されていません）`);
@@ -462,7 +598,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
     await this.sleep(3000);
 
-    // k2_2 に戻るまで待機（全1ボタンが存在するフレームを検出）
+    // k2_2 に戻るまで待機
     let k2_2MainFrame: Frame | null = null;
     for (let i = 0; i < 20; i++) {
       const allF = hamPage.frames();
@@ -515,12 +651,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     logger.debug('Step 13: 保存結果検証OK');
 
     // === Step 14: スプレッドシート更新 ===
-    await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み');
-    await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString());
+    await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
+    await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
     logger.info(`転記完了: ${record.recordId} - ${record.patientName} (${record.visitDate})`);
 
-    // メインメニューに戻る（次のレコード用）
-    await this.auth.navigateToMainMenu();
+    // k2_2 の「戻る」ボタンで k2_1（利用者検索）に戻る
+    // submitTargetForm(form, 'act_back') 相当 — target は mainFrame
+    await this.clickBackButtonOnK2_2(nav);
   }
 
   /**
@@ -532,10 +669,22 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     nav: HamNavigator,
     sheetId: string,
     _codeResult: ServiceCodeResult,
+    tab?: string,
   ): Promise<void> {
-    // Step 1-4: 通常フローと同じ（メニュー → 検索 → 患者選択 → k2_2）
-    await this.auth.navigateToBusinessGuide();
-    await this.auth.navigateToUserSearch();
+    // Step 1-2: k2_1 に遷移（processRecord と同じ智能ページ検出）
+    const currentPageId = await nav.getCurrentPageId();
+    if (currentPageId === 'k2_1') {
+      logger.debug('I5 Step 1-2: 既に k2_1（利用者検索）にいるためスキップ');
+    } else if (currentPageId === 'k2_2') {
+      logger.debug('I5 Step 1-2: k2_2 にいるため「戻る」で k2_1 へ');
+      await this.clickBackButtonOnK2_2(nav);
+    } else {
+      if (currentPageId && currentPageId !== 't1-2') {
+        await this.auth.navigateToMainMenu();
+      }
+      await this.auth.navigateToBusinessGuide();
+      await this.auth.navigateToUserSearch();
+    }
 
     const monthStart = toHamMonthStart(record.visitDate);
     await nav.setSelectValue('searchdate', monthStart);
@@ -553,16 +702,29 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     });
     await this.sleep(1000);
 
-    // 介護/予防判定
+    // 介護/予防判定（ログ出力のみ。実際の切替は k2_7_1 の 6a ステップで実施）
     if (this.patientMaster) {
       const patient = this.patientMaster.findByAozoraId(record.aozoraId);
       if (patient) {
         const careType = PatientMasterService.determineCareType(patient.careLevel);
         if (careType === '予防') {
           logger.info(`I5フロー: 予防モード (${record.patientName}, 要介護度=${patient.careLevel})`);
-          // TODO: k2_7_1 で予防/介護の切替が必要な場合の実装
-          // 現時点ではログのみ。実際のUI操作は実機検証後に追加。
         }
+      }
+    }
+
+    // 日付文字列（スタッフ配置時の行検索に使用）
+    const visitDateHam = toHamDate(record.visitDate);
+
+    // === 重複チェック — 同一日付+時刻のエントリが既にあればスキップ ===
+    if (record.transcriptionFlag !== '修正あり') {
+      const isDuplicate = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      if (isDuplicate) {
+        await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
+        await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
+        logger.info(`I5 重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
+        await this.clickBackButtonOnK2_2(nav);
+        return;
       }
     }
 
@@ -575,68 +737,654 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(1000);
     logger.debug('I5フロー: k2_7_1に遷移');
 
-    // Step 6: k2_7_1 で時間グループ設定
+    // Step 6: k2_7_1 で時間設定 + サービス回数 + サービス検索
+    //
+    // k2_7_1 ページ構造:
+    //   3行の時間設定行（row 0/1/2）。各行に:
+    //     - starttimetype (select): 昼間/夜朝/深夜/指定なし
+    //     - starthour, startminute (select): 開始時刻
+    //     - serivcetimesno{N} (radio): 1回/2回/3回 → onclick=setEndtime(N, count)
+    //     - endhour, endminute (select): 終了時刻
+    //     - serivcename{N} (radio): 通常/複1/複2
+    //   底部:
+    //     - servicetype (radio): 訪問看護(13) / 予防訪問看護(63)
+    //     - サービス検索 ボタン
+    //
+    // ★ serivcetimesno の選択が必須。未選択だとサービス検索が空データになる。
     const startParts = parseTime(record.startTime);
     const endParts = parseTime(record.endTime);
     const startPeriod = getTimePeriod(record.startTime);
+    const durationMinutes = calcDurationMinutes(record.startTime, record.endTime);
+    // サービス回数: 20分=1回、40分=2回、60分=3回（仕様書定義）
+    const serviceCount = Math.min(3, Math.max(1, Math.ceil(durationMinutes / 20)));
+    logger.debug(`I5フロー: duration=${durationMinutes}分 → サービス回数=${serviceCount}回`);
 
-    // k2_7_1 のフォーム要素名は配列形式
-    // 最初のグループ (index 0) に設定
-    const frame = await nav.getMainFrame('k2_7_1');
-    await frame.evaluate(({ sp, sh, sm, eh, em }) => {
-      const form = document.forms[0];
-      // 時間帯区分
-      const starttimetype = form['starttimetype'] as unknown as HTMLSelectElement | undefined;
-      if (starttimetype) starttimetype.value = sp;
-      // 開始時刻
-      const starthour = form['starthour'] as unknown as HTMLSelectElement | undefined;
-      if (starthour) starthour.value = sh;
-      const startminute = form['startminute'] as unknown as HTMLSelectElement | undefined;
-      if (startminute) startminute.value = sm;
-      // 終了時刻
-      const endhour = form['endhour'] as unknown as HTMLSelectElement | undefined;
-      if (endhour) endhour.value = eh;
-      const endminute = form['endminute'] as unknown as HTMLSelectElement | undefined;
-      if (endminute) endminute.value = em;
-    }, {
-      sp: startPeriod,
-      sh: startParts.hour,
-      sm: startParts.minute,
-      eh: endParts.hour,
-      em: endParts.minute,
+    // --- 6a: 訪問看護(13) vs 予防訪問看護(63) の確認・切替 ---
+    // 要介護1-5 → 13(訪問看護), 要支援1-2 → 63(予防訪問看護)
+    // HAM がデフォルトで正しい方を選択している場合が多いが、
+    // 不一致の場合のみ radio をクリックして切替（ページリロード発生）。
+    let expectedServiceType = '13'; // デフォルト: 訪問看護
+    if (this.patientMaster) {
+      const patient = this.patientMaster.findByAozoraId(record.aozoraId);
+      if (patient) {
+        const careType = PatientMasterService.determineCareType(patient.careLevel);
+        if (careType === '予防') expectedServiceType = '63';
+      }
+    }
+
+    let k2_7_1Frame = await nav.getMainFrame('k2_7_1');
+    const currentServiceType = await k2_7_1Frame.evaluate(() => {
+      const radios = document.querySelectorAll('input[name="servicetype"]');
+      for (const r of Array.from(radios)) {
+        if ((r as HTMLInputElement).checked) return (r as HTMLInputElement).value;
+      }
+      return '';
+    });
+    const serviceTypeLabel = currentServiceType === '63' ? '予防訪問看護' : '訪問看護';
+    logger.info(`I5フロー: ${serviceTypeLabel} (servicetype=${currentServiceType}) が選択済み`);
+
+    if (currentServiceType !== expectedServiceType) {
+      // radio クリック → act_change_servicetype → ページリロード
+      logger.info(`I5フロー: servicetype 切替 ${currentServiceType} → ${expectedServiceType}`);
+      await k2_7_1Frame.evaluate((val) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).submited = 0;
+        const form = document.forms[0];
+        const radios = document.querySelectorAll('input[name="servicetype"]');
+        for (const r of Array.from(radios)) {
+          if ((r as HTMLInputElement).value === val) {
+            (r as HTMLInputElement).checked = true;
+            break;
+          }
+        }
+        form.doAction.value = 'act_change_servicetype';
+        form.target = 'commontarget';
+        if (form.doTarget) form.doTarget.value = 'commontarget';
+        form.submit();
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      }, expectedServiceType);
+      await this.sleep(3000);
+      k2_7_1Frame = await nav.waitForMainFrame('k2_7_1', 15000);
+      logger.debug(`I5フロー: servicetype 切替完了 → ${expectedServiceType}`);
+    }
+
+    // --- 6b: starttimetype（時間帯区分）---
+    const currentTimeType = await k2_7_1Frame.evaluate(() => {
+      const selects = document.querySelectorAll('select[name="starttimetype"]');
+      return selects.length > 0 ? (selects[0] as HTMLSelectElement).value : '1';
     });
 
-    // サービス検索ボタン
-    await nav.submitForm({ action: 'act_search', waitForPageId: 'k2_7_1' });
-    await this.sleep(1500);
+    if (currentTimeType !== startPeriod) {
+      // starttimetype を変更 → onchange で submitTargetForm → ページリロード
+      await k2_7_1Frame.evaluate((val) => {
+        (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
+        const selects = document.querySelectorAll('select[name="starttimetype"]');
+        if (selects.length > 0) {
+          (selects[0] as HTMLSelectElement).value = val;
+          (selects[0] as HTMLSelectElement).dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, startPeriod);
+      await this.sleep(3000);
+      await nav.waitForMainFrame('k2_7_1', 15000);
+      logger.debug(`I5フロー: starttimetype 変更 ${currentTimeType} → ${startPeriod}`);
+    }
 
-    // 戻る → k2_2
-    await nav.submitForm({ action: 'act_back', waitForPageId: 'k2_2' });
+    // --- 6c: 開始時刻設定（Playwright ネイティブ API で確実にイベント発火） ---
+    // 培訓確認: I5 は1行にN回を設定する方式
+    // 「開始時刻を入れたら2回ボタンを押す → 終了時刻が自動で入る」
+    //
+    // evaluate() での .value 直接設定は HAM の onchange/onfocus ハンドラが発火せず
+    // 内部状態が同期されない問題がある。Playwright の selectOption()/click() を使用する。
+    const frameAfterReload = await nav.getMainFrame('k2_7_1');
+
+    // row 0 の starthour / startminute を Playwright locator で設定
+    // 同名 select が3つあるため nth(0) で最初の行を指定
+    await frameAfterReload.locator('select[name="starthour"]').nth(0).selectOption(startParts.hour);
+    await this.sleep(300);
+    await frameAfterReload.locator('select[name="startminute"]').nth(0).selectOption(startParts.minute);
+    await this.sleep(300);
+    logger.debug(`I5フロー: 開始時刻設定 ${startParts.hour}:${startParts.minute}`);
+
+    // サービス回数 radio クリック — setEndtime(0, count) で終了時刻が自動設定される
+    await frameAfterReload.locator(`input[name="serivcetimesno0"][value="${serviceCount}"]`).click();
     await this.sleep(1000);
+    logger.debug(`I5フロー: サービス回数 ${serviceCount}回 クリック`);
+
+    // --- 6d: 終了時刻を上書き ---
+    // setEndtime() が自動計算した値ではなく、実レコードの終了時刻で上書き
+    await frameAfterReload.locator('select[name="endhour"]').nth(0).selectOption(endParts.hour);
+    await this.sleep(300);
+    await frameAfterReload.locator('select[name="endminute"]').nth(0).selectOption(endParts.minute);
+    await this.sleep(300);
+
+    // 設定値の検証（DOM 読み返し）
+    const i5Verify = await frameAfterReload.evaluate(() => {
+      const sh = document.querySelectorAll('select[name="starthour"]');
+      const sm = document.querySelectorAll('select[name="startminute"]');
+      const eh = document.querySelectorAll('select[name="endhour"]');
+      const em = document.querySelectorAll('select[name="endminute"]');
+      const radios = document.querySelectorAll('input[name="serivcetimesno0"]');
+      let cnt = '';
+      for (const r of Array.from(radios)) {
+        if ((r as HTMLInputElement).checked) cnt = (r as HTMLInputElement).value;
+      }
+      return {
+        sh: sh[0] ? (sh[0] as HTMLSelectElement).value : '',
+        sm: sm[0] ? (sm[0] as HTMLSelectElement).value : '',
+        eh: eh[0] ? (eh[0] as HTMLSelectElement).value : '',
+        em: em[0] ? (em[0] as HTMLSelectElement).value : '',
+        cnt,
+      };
+    });
+    logger.info(`I5フロー: 時間設定検証 start=${i5Verify.sh}:${i5Verify.sm} end=${i5Verify.eh}:${i5Verify.em} 回数=${i5Verify.cnt}`);
+    if (!i5Verify.sh || !i5Verify.cnt) {
+      throw new Error(`I5 時間設定失敗: starthour=${i5Verify.sh}, 回数=${i5Verify.cnt} — DOM値が反映されていません`);
+    }
+    logger.debug(`I5フロー: 時間設定完了 (${record.startTime}-${record.endTime}, 回数=${serviceCount}, timetype=${startPeriod})`);
+
+    // --- 6e: サービス検索 ---
+    await nav.submitForm({ action: 'act_search', waitForPageId: 'k2_7_1' });
+    await this.sleep(2000);
+
+    // サービス検索結果の検証: 検索後に k2_7_1 にエラーメッセージが出ていないか確認
+    const searchResultFrame = await nav.getMainFrame('k2_7_1');
+    const searchError = await searchResultFrame.evaluate(() => {
+      const bodyText = document.body?.innerText || '';
+      if (bodyText.includes('該当するサービスがありません') || bodyText.includes('エラー')) {
+        return bodyText.substring(0, 200);
+      }
+      return '';
+    });
+    if (searchError) {
+      throw new Error(`I5 サービス検索エラー: ${searchError}`);
+    }
+    logger.debug('I5フロー: サービス検索完了');
+
+    // --- 6f: 次へ → 日付選択ページ ---
+    await nav.submitForm({ action: 'act_next' });
+    await this.sleep(2000);
+    logger.debug('I5フロー: 次へ → 日付選択ページ');
+
+    // --- 6g: 日付チェックボックスを選択して決定 ---
+    const dayNum = parseInt(visitDateHam.substring(6, 8));
+    const dateFrame = await nav.getMainFrame();
+    // name="selectdate" value="日" のチェックボックスをクリック
+    await dateFrame.locator(`input[name="selectdate"][value="${dayNum}"]`).click();
+    await this.sleep(500);
+    logger.debug(`I5フロー: ${dayNum}日 チェック`);
+
+    // 決定ボタン → k2_2 に戻る
+    await nav.submitForm({ action: 'act_do', waitForPageId: 'k2_2' });
+    await this.sleep(3000);
+    logger.debug('I5フロー: 決定 → k2_2');
+
+    // === k2_2 でスケジュール行が生成されたか検証 ===
+    // 注意: HAM の k2_2 テーブルでは日付は最初の行にのみ表示される。
+    // 後続の子行（2回目以降の I5 行、減算行）には日付テキストがないため、
+    // 日付でフィルタリングせず「配置」ボタンの総数で判定する。
+    const k2_2FrameCheck = await nav.getMainFrame('k2_2');
+    const newRowCount = await k2_2FrameCheck.evaluate(() => {
+      return document.querySelectorAll('input[name="act_modify"][value="配置"]').length;
+    });
+
+    if (newRowCount === 0) {
+      throw new Error(
+        `I5 転記失敗: 日付選択後にスケジュール行が生成されませんでした ` +
+        `(${record.patientName}, ${record.visitDate}, ${record.startTime}-${record.endTime})`
+      );
+    }
+    logger.info(`I5フロー: k2_2 にスケジュール行（配置ボタン）${newRowCount}行 を確認`);
+
+    // === I5 スタッフ配置: 未配置の行すべてに同一スタッフを配置 ===
+    await this.assignStaffToAllUnassigned(nav, record);
 
     // 全1ボタン（実績フラグ一括設定）
-    await this.clickSelectAll1(nav);
+    const k2_2FrameI5 = await nav.getMainFrame('k2_2');
+    const all1BtnI5 = await k2_2FrameI5.$('input[name="act_chooseall"]');
+    if (all1BtnI5) {
+      await all1BtnI5.click();
+    } else {
+      await this.clickSelectAll1(nav);
+    }
+    await this.sleep(1000);
     logger.debug('I5フロー: 全1ボタン実行');
 
     // 上書き保存
-    await nav.submitForm({
-      action: 'act_update',
-      setLockCheck: true,
-      waitForPageId: 'k2_2',
-    });
-    await this.sleep(2000);
+    const saveBtnI5 = await k2_2FrameI5.$('input[value="上書き保存"]');
+    if (saveBtnI5) {
+      await k2_2FrameI5.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+      await saveBtnI5.click();
+    } else {
+      await nav.submitForm({ action: 'act_update', setLockCheck: true });
+    }
+    await this.sleep(3000);
     logger.debug('I5フロー: 上書き保存実行');
 
     // スプレッドシート更新
-    await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み');
-    await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString());
+    await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
+    await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
     logger.info(`転記完了(I5): ${record.recordId} - ${record.patientName} (${record.visitDate})`);
+
+    // k2_2 の「戻る」ボタンで k2_1（利用者検索）に戻る
+    await this.clickBackButtonOnK2_2(nav);
+  }
+
+  // ========== スタッフ自動補登 ==========
+
+  /**
+   * HAM h1-1a（登録スタッフ一覧）から全登録済みスタッフ名を取得
+   *
+   * 遷移: t1-2 → h1-1 → h1-1a（全件検索） → 名前リスト取得 → t1-2 に戻る
+   */
+  private async fetchHamStaffNames(nav: HamNavigator): Promise<Set<string>> {
+    logger.info('HAM 登録スタッフ一覧を取得中...');
+
+    // t1-2 → h1-1 (スタッフマスタ管理)
+    await this.auth.navigateToStaffMaster();
+    await this.sleep(1500);
+
+    // h1-1 → h1-1a (登録スタッフ一覧)
+    await nav.submitForm({
+      action: 'act_edit',
+      waitForPageId: 'h1-1a',
+      timeout: 15000,
+    });
+    await this.sleep(2000);
+
+    // h1-1a: 全件検索
+    const h1_1aFrame = await nav.waitForMainFrame('h1-1a', 15000);
+
+    // JS ロード待機 (xinwork_searchKeyword が定義されるまで)
+    for (let i = 0; i < 20; i++) {
+      const ready = await h1_1aFrame.evaluate(() =>
+        typeof (window as any).xinwork_searchKeyword === 'function' // eslint-disable-line @typescript-eslint/no-explicit-any
+      ).catch(() => false);
+      if (ready) break;
+      await this.sleep(500);
+    }
+
+    await h1_1aFrame.evaluate(() => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      (window as any).submited = 0;
+      const form = document.forms[0];
+      form.doAction.value = 'act_search';
+      form.target = 'commontarget';
+      if (form.doTarget) form.doTarget.value = 'commontarget';
+      form.submit();
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    });
+
+    // 検索結果待ち（「詳細」ボタン出現まで）
+    let resultFrame: Frame | null = null;
+    const searchStart = Date.now();
+    while (Date.now() - searchStart < 15000) {
+      await this.sleep(1000);
+      try {
+        const frame = await nav.getMainFrame();
+        const count = await frame.evaluate(() =>
+          document.querySelectorAll('input[type="button"][name="act_edit"][value="詳細"]').length
+        ).catch(() => 0);
+        if (count > 0) { resultFrame = frame; break; }
+      } catch { /* フレーム未準備 */ }
+    }
+
+    const names = new Set<string>();
+
+    if (resultFrame) {
+      // h1-1a の HTML 構造:
+      //   <tr><td>[詳細]</td><td>従業員番号</td><td>氏名</td>...</tr>
+      const staffList = await resultFrame.evaluate(() => {
+        const results: string[] = [];
+        const btns = document.querySelectorAll('input[type="button"][name="act_edit"][value="詳細"]');
+        for (const btn of Array.from(btns)) {
+          const row = btn.closest('tr');
+          const cells = row?.querySelectorAll('td');
+          if (cells && cells.length >= 3) {
+            const name = cells[2]?.textContent?.trim() || '';
+            if (name) results.push(name);
+          }
+        }
+        return results;
+      });
+
+      for (const name of staffList) {
+        // 正規化: スペース除去 + NFKC + 旧字体→新字体（眞→真 等）
+        const normalized = normalizeCjkName(name);
+        names.add(normalized);
+        // 元の名前もそのまま追加（全角スペース区切り等）
+        names.add(name);
+      }
+      logger.info(`HAM 登録スタッフ: ${staffList.length}名`);
+    } else {
+      logger.warn('HAM h1-1a 検索結果を取得できませんでした');
+    }
 
     // メインメニューに戻る
     await this.auth.navigateToMainMenu();
+
+    return names;
+  }
+
+  /**
+   * 転記対象レコードのスタッフが HAM に登録されているか事前チェックし、
+   * 未登録のスタッフを SmartHR 経由で自動補登する。
+   *
+   * @returns 補登失敗で転記不可のスタッフ名のセット
+   */
+  private async ensureStaffRegistered(
+    nav: HamNavigator,
+    targets: TranscriptionRecord[],
+  ): Promise<Set<string>> {
+    // HAM の登録済みスタッフ名を取得
+    const hamStaffNames = await this.fetchHamStaffNames(nav);
+
+    // 転記対象の一意なスタッフを抽出
+    const staffMap = new Map<string, { staffName: string; staffNumber: string }>();
+    for (const r of targets) {
+      if (!staffMap.has(r.staffName)) {
+        staffMap.set(r.staffName, { staffName: r.staffName, staffNumber: r.staffNumber });
+      }
+    }
+
+    // HAM に未登録のスタッフを特定
+    // NFKC 正規化で CJK 異体字を統一（﨑→崎, 髙→高 等）
+    const missingStaff: { staffName: string; staffNumber: string }[] = [];
+    for (const [staffName, info] of staffMap) {
+      const normalized = normalizeCjkName(staffName);
+      if (!hamStaffNames.has(normalized) && !hamStaffNames.has(staffName)) {
+        missingStaff.push(info);
+      }
+    }
+
+    if (missingStaff.length === 0) {
+      logger.info('全スタッフが HAM に登録済みです');
+      return new Set();
+    }
+
+    logger.warn(`HAM 未登録スタッフ ${missingStaff.length}名: ${missingStaff.map(s => s.staffName).join(', ')}`);
+
+    // SmartHR + StaffSync が未設定なら補登不可
+    if (!this.smarthr || !this.staffSync) {
+      logger.warn('SmartHR/StaffSync が未設定のため自動補登できません。該当レコードはエラーになります');
+      return new Set(missingStaff.map(s => s.staffName));
+    }
+
+    // SmartHR から従業員情報を取得
+    const empCodes = missingStaff
+      .map(s => s.staffNumber)
+      .filter(code => code !== '');
+
+    if (empCodes.length === 0) {
+      logger.warn('従業員番号が空のためSmartHR検索不可。該当レコードはエラーになります');
+      return new Set(missingStaff.map(s => s.staffName));
+    }
+
+    const crewMap = await this.smarthr.getCrewsByEmpCodes(empCodes);
+    logger.info(`SmartHR 検索結果: ${crewMap.size}/${empCodes.length}名`);
+
+    // StaffMasterEntry に変換
+    const entriesToRegister = [];
+    const failedNames = new Set<string>();
+
+    for (const staff of missingStaff) {
+      const crew = crewMap.get(staff.staffNumber);
+      if (!crew) {
+        logger.error(`SmartHR にも見つかりません: ${staff.staffName} (emp_code=${staff.staffNumber})`);
+        failedNames.add(staff.staffName);
+        continue;
+      }
+      entriesToRegister.push(this.smarthr.toStaffMasterEntry(crew));
+    }
+
+    // TRITRUS + HAM に登録
+    if (entriesToRegister.length > 0) {
+      const syncResult = await this.staffSync.registerSpecificStaff(entriesToRegister);
+      logger.info(`スタッフ補登結果: 登録=${syncResult.synced}, スキップ=${syncResult.skipped}, エラー=${syncResult.errors}`);
+
+      // 登録失敗したスタッフを特定
+      for (const detail of syncResult.details) {
+        if (detail.phase1 === 'error') {
+          failedNames.add(detail.staffName);
+        }
+      }
+
+      // メインメニューに戻る
+      await this.auth.navigateToMainMenu();
+    }
+
+    return failedNames;
   }
 
   // ========== ヘルパーメソッド ==========
+
+  /**
+   * k2_2 で未配置の全行にスタッフを配置する（I5 フロー用）
+   *
+   * I5 は 1レコードで複数行（例: 11:00-11:20 と 11:20-11:40）を生成する。
+   * 各行の「配置」ボタンをクリック → スタッフ選択 → 確認 → 戻る を繰り返す。
+   *
+   * 注意: HAM の k2_2 テーブルでは日付は最初の行のみ表示。
+   * 後続の子行（2回目以降）には日付テキストがないため、
+   * 日付フィルタなしで全「配置」ボタンを対象にする。
+   */
+  private async assignStaffToAllUnassigned(
+    nav: HamNavigator,
+    record: TranscriptionRecord,
+  ): Promise<void> {
+    const hamPage = nav.hamPage;
+    // CJK 異体字正規化: NFKC + 旧字体→新字体（眞→真, 﨑→崎 等）
+    const staffSearchName = normalizeCjkName(record.staffName);
+
+    // 未配置行の assignId を全て取得（日付フィルタなし — 子行には日付表示がないため）
+    const frame = await nav.getMainFrame('k2_2');
+    const unassignedIds: string[] = await frame.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('input[name="act_modify"][value="配置"]'));
+      const ids: string[] = [];
+      for (const btn of btns) {
+        const tr = btn.closest('tr');
+        // 担当スタッフ欄が空 = 未配置
+        const staffCell = tr?.querySelector('td[bgcolor="#DDEEFF"]');
+        if (staffCell?.textContent?.trim()) continue;
+        const onclick = btn.getAttribute('onclick') || '';
+        const m = onclick.match(/assignid\s*,\s*'(\d+)'/) || onclick.match(/assignid\.value\s*=\s*'(\d+)'/);
+        if (m) ids.push(m[1]);
+      }
+      return ids;
+    });
+
+    if (unassignedIds.length === 0) {
+      logger.debug('I5 スタッフ配置: 未配置行なし（既に配置済み）');
+      return;
+    }
+
+    logger.info(`I5 スタッフ配置: ${unassignedIds.length}行に「${record.staffName}」を配置`);
+
+    for (let idx = 0; idx < unassignedIds.length; idx++) {
+      const aid = unassignedIds[idx];
+      logger.debug(`I5 スタッフ配置 ${idx + 1}/${unassignedIds.length}: assignId=${aid}`);
+
+      // k2_2 → k2_2f（配置画面）
+      const k2_2Frame = await nav.getMainFrame('k2_2');
+      await k2_2Frame.evaluate((assignId) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const win = window as any;
+        const form = document.forms[0];
+        const lockChecks = document.getElementsByName('lockCheck');
+        if (lockChecks[0]) (lockChecks[0] as HTMLInputElement).value = '1';
+        win.submited = 0;
+        if (typeof win.submitTargetFormEx === 'function') {
+          win.submitTargetFormEx(form, 'act_modify', form.assignid, assignId);
+        } else {
+          form.assignid.value = assignId;
+          form.doAction.value = 'act_modify';
+          form.target = 'commontarget';
+          if (form.doTarget) form.doTarget.value = 'commontarget';
+          form.submit();
+        }
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      }, aid);
+
+      await nav.waitForMainFrame('k2_2f', 15000);
+      await this.sleep(1000);
+
+      // k2_2f の配置ボタンクリック
+      const k2_2fFrame = await nav.getMainFrame('k2_2f');
+      await k2_2fFrame.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+      const haichiBtn = await k2_2fFrame.$('input[name="act_select"][value="配置"]');
+      if (haichiBtn) {
+        await haichiBtn.click();
+      } else {
+        await nav.submitForm({ action: 'act_select' });
+      }
+      await this.sleep(3000);
+
+      // 従業員リスト待ち（全フレーム検索）
+      let staffFrame: Frame | null = null;
+      for (let i = 0; i < 20; i++) {
+        for (const f of hamPage.frames()) {
+          const hasList = await f.evaluate(() =>
+            document.querySelectorAll('input[name="act_select"][value="選択"]').length > 0
+          ).catch(() => false);
+          if (hasList) { staffFrame = f; break; }
+        }
+        if (staffFrame) break;
+        await this.sleep(1000);
+      }
+      if (!staffFrame) {
+        throw new Error(`スタッフ選択リストが表示されません (assignId=${aid})`);
+      }
+
+      // HAM choice() でスタッフ選択（CJK 異体字正規化: NFKC + 旧字体→新字体）
+      const choiceResult = await staffFrame.evaluate((args: { searchName: string; variantMap: [string, string][] }) => {
+        function normCjk(s: string): string {
+          let r = s.normalize('NFKC');
+          for (const [old, rep] of args.variantMap) {
+            if (r.includes(old)) r = r.replaceAll(old, rep);
+          }
+          return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
+        }
+        const rows = Array.from(document.querySelectorAll('tr'));
+        for (const row of rows) {
+          const rowText = normCjk(row.textContent || '');
+          if (!rowText.includes(args.searchName)) continue;
+          const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
+          if (!selectBtn || selectBtn.disabled) continue;
+          const onclick = selectBtn.getAttribute('onclick') || '';
+          const m = onclick.match(/choice\(this,\s*'(\d+)',\s*'([^']+)',\s*(\d+)\)/);
+          if (!m) continue;
+          (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
+          if (typeof (window as any).choice === 'function') { // eslint-disable-line @typescript-eslint/no-explicit-any
+            (window as any).choice(selectBtn, m[1], m[2], 1); // eslint-disable-line @typescript-eslint/no-explicit-any
+            return { found: true, staffName: m[2] };
+          }
+          selectBtn.click();
+          return { found: true, staffName: m[2] };
+        }
+        return { found: false, staffName: '' };
+      }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
+
+      if (!choiceResult.found) {
+        throw new Error(`スタッフ「${record.staffName}」が見つかりません`);
+      }
+      await this.sleep(3000);
+
+      // 確認画面の決定ボタン
+      let confirmClicked = false;
+      for (let retry = 0; retry < 10; retry++) {
+        for (const f of hamPage.frames()) {
+          try {
+            const hasConfirm = await f.evaluate(() => {
+              const body = document.body?.innerText || '';
+              return body.includes('スタッフでよろしければ') || body.includes('決定');
+            }).catch(() => false);
+            if (hasConfirm) {
+              const ketteBtn = await f.$('input[value="決定"]');
+              if (ketteBtn) {
+                await f.evaluate(() => { (window as any).submited = 0; }); // eslint-disable-line @typescript-eslint/no-explicit-any
+                await ketteBtn.click();
+                confirmClicked = true;
+                break;
+              }
+            }
+          } catch { /* ignore */ }
+        }
+        if (confirmClicked) break;
+        await this.sleep(1000);
+      }
+      await this.sleep(3000);
+
+      // 「戻る」リンクで k2_2 に戻る
+      let backClicked = false;
+      for (const f of hamPage.frames()) {
+        try {
+          const backLink = await f.$('a:has-text("戻る")');
+          if (backLink) {
+            await backLink.click();
+            backClicked = true;
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+      if (!backClicked) {
+        await nav.submitForm({ action: 'act_back' });
+      }
+      await this.sleep(3000);
+
+      // k2_2 に戻ったか確認
+      for (let i = 0; i < 15; i++) {
+        const pageId = await nav.getCurrentPageId();
+        if (pageId === 'k2_2') break;
+        await this.sleep(1000);
+      }
+
+      logger.debug(`I5 スタッフ配置 ${idx + 1}/${unassignedIds.length}: 完了`);
+    }
+  }
+
+  /**
+   * k2_2 の「戻る」ボタンをクリックして k2_1（利用者検索）に戻る
+   *
+   * HAM の「戻る」ボタンは submitTargetForm(form, 'act_back') を使う。
+   * これは form.target を mainFrame にして submit するため、
+   * 通常の submitForm（commontarget）とは異なる。
+   */
+  private async clickBackButtonOnK2_2(nav: HamNavigator): Promise<void> {
+    const hamPage = nav.hamPage;
+    let clicked = false;
+
+    // k2_2 のフレームから「戻る」ボタンを探してクリック
+    for (const frame of hamPage.frames()) {
+      try {
+        const backBtn = await frame.$('input[name="act_back"][value="戻る"]');
+        if (backBtn) {
+          await frame.evaluate(() => {
+            (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
+          });
+          await backBtn.click();
+          clicked = true;
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (!clicked) {
+      logger.warn('k2_2 の「戻る」ボタンが見つかりません。navigateToMainMenu にフォールバック');
+      await this.auth.navigateToMainMenu();
+      return;
+    }
+
+    // k2_1 に戻るまで待機
+    for (let i = 0; i < 15; i++) {
+      await this.sleep(1000);
+      const pageId = await nav.getCurrentPageId();
+      if (pageId === 'k2_1') {
+        logger.debug('k2_2 → k2_1 に戻った');
+        return;
+      }
+    }
+
+    logger.warn('k2_1 への遷移がタイムアウト。現在のページで続行');
+  }
 
   /**
    * k2_1 の検索結果から患者 ID (careuserid) を取得
@@ -669,7 +1417,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
     }
 
-    const result = await frame.evaluate(({ name, useHihokensha, hihokensha }) => {
+    const result = await frame.evaluate(({ name, useHihokensha, hihokensha, variantMap }) => {
       // careuserid パターン: submitTargetFormEx(this.form,'k2_2',careuserid,'8876382')
       // → 第4引数がID。onclick 全体から抽出
       const careUserIdRegex = /careuserid\s*,\s*'(\d+)'/;
@@ -686,9 +1434,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
       // HAM の患者名は「瀧下　絹子」（全角スペース）だが
       // Google Sheets は「瀧下絹子」（スペースなし）のため、
-      // 比較時にスペースを除去して正規化する
+      // 比較時にスペースを除去 + NFKC + 旧字体→新字体（眞→真 等）で正規化する
       function normalize(s: string): string {
-        return s.replace(/[\s\u3000\u00a0]+/g, '').trim();
+        let r = s.normalize('NFKC');
+        for (const [old, rep] of variantMap) {
+          if (r.includes(old)) r = r.replaceAll(old, rep);
+        }
+        return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
       }
 
       const normalizedName = normalize(name);
@@ -733,7 +1485,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
 
       return null;
-    }, { name: patientName, useHihokensha: searchByHihokensha, hihokensha: hihokenshaBangou });
+    }, { name: patientName, useHihokensha: searchByHihokensha, hihokensha: hihokenshaBangou, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
     if (result) {
       logger.debug(`患者ID検出: ${patientName}${searchByHihokensha ? `(被保険者番号=${hihokenshaBangou})` : ''} → ${result}`);
@@ -798,6 +1550,49 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
+   * k2_2 で同一日付+開始時刻のスケジュールが既に存在するかチェック
+   *
+   * 行テキスト例: "9日  月  10:10 ～ 11:09  訪問看護基本療養費（Ⅰ・Ⅱ）"
+   * 日付行の下に子行（日付なし）が続く場合がある。
+   * 「配置」ボタンが存在する行（＝スタッフ配置済み）のみを "登録済み" と判定する。
+   */
+  private async checkDuplicateOnK2_2(
+    nav: HamNavigator,
+    visitDateHam: string,
+    startTime: string,
+  ): Promise<boolean> {
+    const frame = await nav.getMainFrame('k2_2');
+    const dayNum = parseInt(visitDateHam.substring(6, 8));
+    const dayDisplay = `${dayNum}日`;
+
+    const found = await frame.evaluate(({ dd, st }) => {
+      const rows = Array.from(document.querySelectorAll('tr'));
+      let inTargetDay = false;
+      for (const row of rows) {
+        const text = row.textContent || '';
+        // 日付行を検出
+        if (text.includes(dd)) {
+          inTargetDay = true;
+        } else if (/^\s*\d+日/.test(text.trim())) {
+          // 別の日付行に入ったらリセット
+          inTargetDay = false;
+        }
+        if (!inTargetDay) continue;
+        if (!text.includes(st)) continue;
+        // 配置ボタンまたは編集ボタンがある → 既に登録済み
+        const hasEdit = row.querySelector('input[value="編集"]');
+        if (hasEdit) return true;
+      }
+      return false;
+    }, { dd: dayDisplay, st: startTime });
+
+    if (found) {
+      logger.info(`重複検出: ${dayDisplay} ${startTime} — k2_2 に既存エントリあり。スキップします`);
+    }
+    return found;
+  }
+
+  /**
    * k2_2 で既存スケジュールを削除する（修正レコード再転記時に使用）
    *
    * 同一日付 + 同一開始時刻の既存エントリを特定し、削除ボタンをクリックして上書き保存する。
@@ -848,8 +1643,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     logger.info(`既存スケジュール削除: ${deleteInfo.rowText} (assignid=${deleteInfo.assignid})`);
 
     if (deleteInfo.record2flag === '1') {
-      logger.warn(`記録書IIが存在します (assignid=${deleteInfo.assignid})。削除をスキップします`);
-      return false;
+      throw new Error(`record2flag=1: 記録書IIにより削除不可 (assignid=${deleteInfo.assignid})`);
     }
 
     // confirmDelete を Playwright native click で実行（confirm ダイアログは自動承認）
@@ -979,26 +1773,36 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       const allFrames = nav.hamPage.frames();
       for (const frame of allFrames) {
         if (frame.url().includes('syserror')) {
-          // syserror ページの「閉じる」ボタンをクリック
           await frame.evaluate(() => {
             const btn = document.querySelector('input[type="button"], button');
             if (btn) (btn as HTMLElement).click();
           }).catch(() => {});
-          await this.sleep(1000);
+          await this.sleep(2000);
           break;
         }
       }
 
-      // 通常の act_back で戻る
-      for (let i = 0; i < 5; i++) {
-        const pageId = await nav.getCurrentPageId();
-        if (!pageId || pageId === 't1-2') break;
-        await nav.submitForm({ action: 'act_back' }).catch(() => {});
-        await this.sleep(1000);
+      // getCurrentPageId は URL + DOM を検証済み（k2_1 なら searchdate 存在チェック済み）
+      const pageId = await nav.getCurrentPageId();
+
+      if (pageId === 'k2_2') {
+        // k2_2 にいる場合は「戻る」ボタンで k2_1 に戻る
+        await this.clickBackButtonOnK2_2(nav);
+        return;
       }
+      if (pageId === 'k2_1') {
+        // getCurrentPageId が k2_1 を返す = searchdate が実際に存在する
+        logger.debug('tryRecoverToMainMenu: k2_1 にいるためそのまま続行');
+        return;
+      }
+
+      // pageId が null（異常ページ）またはその他のページ → メインメニュー経由で完全復帰
+      // navigateToMainMenu は forceNavigateToMainMenu まで含むため、
+      // 異常ページからでも t1-2 に戻れる
+      logger.info(`tryRecoverToMainMenu: pageId=${pageId} → メインメニューへ復帰`);
+      await this.auth.navigateToMainMenu();
     } catch {
       logger.warn('メインメニューへの復帰に失敗。次のレコードで再ログインを試みます');
-      // 再ログインフラグを設定（KanamickAuthService の isLoggedIn を false にする）
       try {
         await this.auth.ensureLoggedIn();
       } catch {
