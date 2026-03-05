@@ -1760,13 +1760,21 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(2000);
     }
 
-    // 上書き保存（削除反映に必須）
-    await nav.submitForm({
-      action: 'act_update',
-      setLockCheck: true,
-      waitForPageId: 'k2_2',
-    });
+    // confirmDelete() は内部で form.submit() を実行済み → ページリロードを待つだけ
+    // ※ 以前は nav.submitForm(act_update) を二重送信していたため form.doAction 消失バグが発生
+    await nav.waitForMainFrame('k2_2', 15000);
     await this.sleep(2000);
+
+    // form.doAction が復元されていることを確認（後続の act_addnew で必須）
+    for (let waitIdx = 0; waitIdx < 10; waitIdx++) {
+      const f = await nav.getMainFrame('k2_2');
+      const ready = await f.evaluate(() => {
+        const form = document.forms[0];
+        return !!(form && (form as HTMLFormElement & { doAction?: unknown }).doAction);
+      }).catch(() => false);
+      if (ready) break;
+      await this.sleep(1000);
+    }
 
     logger.info(`既存スケジュール削除完了: assignid=${deleteInfo.assignid}`);
     return true;
