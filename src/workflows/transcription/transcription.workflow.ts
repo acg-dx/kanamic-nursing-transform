@@ -2290,7 +2290,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         }
       }
 
-      // チェックボックス設定
+      // チェックボックス設定（全 checkbox を明示的に目標状態に設定）
+      // ★ HAM が URL パラメータ等で checkbox を pre-check する場合があるため、
+      //   必要ないものは明示的に OFF にしないと誤ったフィルタ結果になる
       const setCheckbox = (name: string, checked: boolean) => {
         const cb = document.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
         if (cb) {
@@ -2298,9 +2300,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           if (checked) cb.value = '1';
         }
       };
-      if (args.cbs.flag2) setCheckbox('flag2', true);
-      if (args.cbs.pluralnurseflag1) setCheckbox('pluralnurseflag1', true);
-      if (args.cbs.pluralnurseflag2) setCheckbox('pluralnurseflag2', true);
+      setCheckbox('flag2', !!args.cbs.flag2);
+      setCheckbox('pluralnurseflag1', !!args.cbs.pluralnurseflag1);
+      setCheckbox('pluralnurseflag2', !!args.cbs.pluralnurseflag2);
     }, { searchKbnValue: targetValue, cbs: checkboxes || {} });
 
     // 検索ボタンをクリックしてフィルタ結果を表示
