@@ -2119,10 +2119,26 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみで検索
     const lookupName = extractPlainName(record.staffName).replace(/[\s\u3000]+/g, '');
-    const staffQuals = this.staffQualifications.get(lookupName) || [];
+    let staffQuals = this.staffQualifications.get(lookupName) || [];
+
+    // SmartHR に資格情報がない場合、staffName の資格プレフィックスから取得（フォールバック）
+    // 例: "准看護師-冨迫広美" → ['准看護師'], "理学療法士等-阪本大樹" → ['理学療法士']
     if (staffQuals.length === 0) {
-      logger.warn(`資格情報なし: ${record.staffName} (lookup="${lookupName}")（デフォルト選択を使用）`);
-      return;
+      const nameStr = record.staffName.trim();
+      const dashIdx = nameStr.indexOf('-');
+      if (dashIdx > 0) {
+        const prefix = nameStr.substring(0, dashIdx);
+        // 資格プレフィックスとして認識できるか確認
+        const knownQuals = ['看護師', '准看護師', '理学療法士等', '理学療法士', '作業療法士', '言語聴覚士'];
+        if (knownQuals.includes(prefix)) {
+          staffQuals = [prefix];
+          logger.debug(`資格フォールバック: ${record.staffName} → staffName から "${prefix}" を取得`);
+        }
+      }
+      if (staffQuals.length === 0) {
+        logger.warn(`資格情報なし: ${record.staffName} (lookup="${lookupName}")（デフォルト選択を使用）`);
+        return;
+      }
     }
 
     const isKaigo = record.serviceType1 === '介護';
