@@ -344,10 +344,10 @@ export class HamNavigator {
       const exactValue = `${type}#${item}`;
       let target = radios.find(r => r.value === exactValue);
 
-      // 方法2: テキストパターンマッチ（改善版）
-      // 「減算」「超過」「加算」等の調整項目を避け、基本サービスを優先する。
-      // require が指定されている場合、pattern AND require 両方を含む行のみを候補とする。
-      // require 未指定の場合は、行テキストが最短のもの（＝最も基本的なサービス）を選ぶ。
+      // 方法2: テキストパターンマッチ（精准版）
+      // - textRequire が指定されている場合は必須条件として扱う（サイレント無視しない）
+      // - 「減算」「超過」「移行」等の調整項目を避け、基本サービスを優先する
+      // - 最短テキスト行 = 最も基本的なサービスを選択
       if (!target && pattern) {
         const adjustmentKeywords = ['減算', '超過', '移行'];
         let bestCandidate: HTMLInputElement | null = null;
@@ -357,7 +357,7 @@ export class HamNavigator {
           const tr = r.closest('tr');
           const rowText = tr?.textContent?.trim() || '';
           if (!rowText.includes(pattern)) continue;
-          // textRequire: 追加必須パターン（例: '・緊急'）
+          // textRequire: 必須パターン（例: '・准', '・緊急'）— 設定時は厳格に適用
           if (require && !rowText.includes(require)) continue;
           // 調整項目は後回し
           const isAdjustment = adjustmentKeywords.some(kw => rowText.includes(kw));
@@ -368,7 +368,7 @@ export class HamNavigator {
             bestLength = rowText.length;
           }
         }
-        // フォールバック: require 付きで基本サービスが見つからない → 調整項目も含めて再検索
+        // フォールバック: 調整項目も含めて再検索（textRequire は維持 — 精准一致を保証）
         if (!bestCandidate) {
           for (const r of radios) {
             if (!r.value) continue;
@@ -380,32 +380,21 @@ export class HamNavigator {
             break;
           }
         }
-        // フォールバック2: require なしで pattern のみ再試行（require が原因で候補ゼロの場合）
-        if (!bestCandidate && require) {
-          for (const r of radios) {
-            if (!r.value) continue;
-            const tr = r.closest('tr');
-            const rowText = tr?.textContent?.trim() || '';
-            if (rowText.includes(pattern)) {
-              bestCandidate = r;
-              break;
-            }
-          }
-        }
+        // ★ フォールバック2 廃止: textRequire 無視での再試行を削除
+        // textRequire が設定されている場合、条件を満たさない候補は許容しない
         target = bestCandidate ?? undefined;
       }
 
-      // 方法3: 最初の有効な radio を選択（フォールバック）
+      // ★ 方法3 廃止: ランダムフォールバックを削除 → 候補一覧付きエラーで明示的に失敗
       if (!target) {
-        target = radios.find(r => r.value && r.value.includes('#'));
-      }
-
-      if (!target) {
-        const available = radios.map(r => {
+        const available = radios.slice(0, 30).map(r => {
           const tr = r.closest('tr');
-          return `${r.value} → ${tr?.textContent?.trim().replace(/\s+/g, ' ').substring(0, 60) || ''}`;
+          return `${r.value} → ${tr?.textContent?.trim().replace(/\s+/g, ' ').substring(0, 80) || ''}`;
         });
-        throw new Error(`サービスコード未検出: 候補=${JSON.stringify(available)}`);
+        throw new Error(
+          `サービスコード精准一致失敗: exactValue=${type}#${item}, pattern="${pattern}", require="${require}"\n` +
+          `候補一覧 (${radios.length}件中先頭30件):\n${available.join('\n')}`
+        );
       }
 
       target.checked = true;
