@@ -238,12 +238,30 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // O列「緊急時支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
     if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
 
-    // P列「同行者」→ 転記なし（転記処理詳細: 同行者は転記対象外）
-    if (record.accompanyClerkCheck.trim() === '同行者') return false;
-    // P列「複数人(副)」かつ Q列=TRUE → 転記なし（転記処理詳細: 複数人(副)+複数名訪問(二)は転記対象外）
-    const multiVisitTruthy = record.multipleVisit?.trim().toLowerCase();
-    if (record.accompanyClerkCheck.trim() === '複数人(副)' &&
-        (multiVisitTruthy === 'true' || multiVisitTruthy === '1')) return false;
+    // ---- 転記処理詳細.xlsx 全組み合わせ表に基づく転記対象外判定 ----
+    const pCol = record.accompanyClerkCheck.trim();     // P列: 同行事務員チェック
+    const qTruthy = ['true', '1'].includes(           // Q列: 複数名訪問(二)
+      (record.multipleVisit?.trim().toLowerCase() || ''));
+    const st1 = record.serviceType1;                    // K列: 支援区分1
+    const st2 = record.serviceType2;                    // L列: 支援区分2
+
+    // P列「同行者」→ 転記なし（全支援区分共通: 医療ROW18-19, 精神ROW42-43,55-56, 介護ROW3,11）
+    if (pCol === '同行者') return false;
+
+    // --- 医療+通常: 複数人(副)+Q=true → 転記なし (ROW 23) ---
+    if (st1 === '医療' && st2.startsWith('通常') && pCol === '複数人(副)' && qTruthy) return false;
+
+    // --- 精神+通常: 複数人(副)+Q=true → 転記なし (ROW 47) ---
+    if (st1 === '精神医療' && st2.startsWith('通常') && pCol === '複数人(副)' && qTruthy) return false;
+
+    // --- 医療+リハビリ: P≠空欄 → 全部転記なし (ROW 29-38) ---
+    if (st1 === '医療' && st2 === 'リハビリ' && pCol !== '') return false;
+
+    // --- 精神医療+リハビリ: 複数人系+Q=false → 転記しない (ROW 57,59,61) ---
+    // ★精神+リハビリ+複数人+Q=true は転記する (ROW 58,60,62) → スキップしない★
+    if (st1 === '精神医療' && st2 === 'リハビリ') {
+      if (['複数人(主)', '複数人(副)', '複数人(看護+介護)'].includes(pCol) && !qTruthy) return false;
+    }
 
     if (record.transcriptionFlag === '転記済み') return false;
     if (record.transcriptionFlag === '') return true;
@@ -270,6 +288,30 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // サービスコード決定
     const codeResult = this.resolver.resolve(record);
     logger.debug(`サービスコード: ${codeResult.description} (${codeResult.servicetype}#${codeResult.serviceitem})`);
+
+    // --- 介護度判定: K列='介護' でも実際の介護度が要支援 → 予防 (showflag=2) に切替 ---
+    // Google Sheet K列は '介護' と記載されるが、患者の介護度が要支援1-2の場合、
+    // HAM では予防訪問看護（showflag=2, servicetype=63）として登録する必要がある。
+    // I5 フロー（介護+リハビリ）は内部で servicetype 13→63 切替済み（6a ステップ）。
+    // k2_3a フロー（介護+通常/緊急）はここで showflag + textPattern を上書きする。
+    if (record.serviceType1 === '介護' && this.patientMaster) {
+      const patient = this.patientMaster.findByAozoraId(record.aozoraId);
+      if (patient) {
+        const careType = PatientMasterService.determineCareType(patient.careLevel);
+        if (careType === '予防') {
+          logger.info(
+            `介護度判定: ${record.patientName} は${patient.careLevel} → 予防モード ` +
+            `(showflag=${codeResult.showflag}→2, textPattern=${codeResult.textPattern}→予訪看Ⅰ３)`,
+          );
+          codeResult.showflag = '2';
+          codeResult.servicetype = '63';
+          // HAM k2_3a showflag=2 のサービス一覧: '予訪看Ⅰ３' (CSV実績: '予訪看Ⅰ５' の命名規則に準拠)
+          if (codeResult.textPattern === '訪看Ⅰ３') {
+            codeResult.textPattern = '予訪看Ⅰ３';
+          }
+        }
+      }
+    }
 
     // 介護+リハビリ → k2_7_1 フロー
     if (codeResult.useI5Page) {
@@ -482,7 +524,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 資格フィルタを先に適用することで、サービスコード一覧が准看護師用に絞り込まれる
     await this.selectQualificationCheckbox(nav, record, codeResult);
 
-    await nav.selectServiceCode(codeResult.servicetype, codeResult.serviceitem, undefined, codeResult.textPattern);
+    await nav.selectServiceCode(codeResult.servicetype, codeResult.serviceitem, undefined, codeResult.textPattern, codeResult.textRequire);
     logger.debug(`Step 7: サービスコード選択完了 (${codeResult.servicetype}#${codeResult.serviceitem})`);
 
     // 次へ → k2_3b
@@ -2047,22 +2089,35 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
-   * k2_3a でスタッフ資格チェックボックスを選択
-   * 医療保険 (showflag=3) の場合のみ。
+   * k2_3a でスタッフ資格に基づく searchKbn ラジオボタン + チェックボックスを選択
    *
-   * - 通常/緊急: 看護師等 or 准看護師等
-   * - リハビリ: 理学療法士等のみ（看護師/准看護師はエラー）
+   * ★全保険種別対応（介護/医療/精神医療）★
+   * 介護 (showflag=1): searchKbn で看護師/准看護師を区別（訪看Ⅰ３ vs ・准）
+   * 医療 (showflag=3): searchKbn + checkbox で資格フィルタ
+   * 精神 (showflag=3): 同上 + flag2(緊急)
+   *
+   * 転記処理詳細.xlsx 全組み合わせ表に準拠:
+   *   - searchKbn: 資格判定（看護師→1, 准看護師→2, 理学療法士等→3）
+   *   - flag2=緊急: 精神医療+緊急+加算対象 のみ (ROW 50)
+   *   - pluralnurseflag1=複数名訪問: 通常+複数人(主/副/看護+介護)+Q=false
+   *     ROW 4-5,7(介護), ROW 20,22,24(医療), ROW 44,46,48(精神)
+   *   - pluralnurseflag2=複数名訪問(二): (支援者/複数人(主)/看護+介護/複数人(副))+Q=true
+   *     ROW 8-10(介護), ROW 17,21,25(医療), ROW 41,45,49,58,60,62(精神)
+   *
+   * 資格制限:
+   *   - 医療+リハビリ: 理学療法士等のみ（看護師/准看護師→エラー）
+   *   - 精神+リハビリ: 全資格OK（医療リハビリと異なる！）
+   *   - 精神+通常+複数人(主/副)+Q=false: 主は看護師のみ（准/理学→エラー）
    */
   private async selectQualificationCheckbox(
     nav: HamNavigator,
     record: TranscriptionRecord,
     codeResult: ServiceCodeResult,
   ): Promise<void> {
-    // 医療保険 (showflag=3) のみ
-    if (codeResult.showflag !== '3') return;
+    // 介護+リハビリ (useI5Page=true) は k2_3a を経由しないのでスキップ
+    if (codeResult.useI5Page) return;
 
     // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみで検索
-    // 空白除去: SmartHR は "姓 名"、Sheet は "姓名" のため正規化して照合
     const lookupName = extractPlainName(record.staffName).replace(/[\s\u3000]+/g, '');
     const staffQuals = this.staffQualifications.get(lookupName) || [];
     if (staffQuals.length === 0) {
@@ -2070,61 +2125,113 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       return;
     }
 
-    // 医療+リハビリの場合、理学療法士等のみ可
-    if (record.serviceType2 === 'リハビリ') {
-      const hasRigaku = staffQuals.some(q =>
-        q.includes('理学療法士') || q.includes('作業療法士') || q.includes('言語聴覚士')
-      );
-      const hasNurse = staffQuals.some(q => q.includes('看護師'));
+    const isKaigo = record.serviceType1 === '介護';
+    const isSeishin = record.serviceType1 === '精神医療';
+    const isRehab = record.serviceType2 === 'リハビリ';
+    const isKinkyu = record.serviceType2.startsWith('緊急');
+    const pCol = record.accompanyClerkCheck?.trim() || '';
+    const qTruthy = ['true', '1'].includes((record.multipleVisit?.trim().toLowerCase() || ''));
+    const isKasanTaisho = record.emergencyClerkCheck?.trim() === '加算対象';
 
-      if (!hasRigaku && hasNurse) {
+    // 資格判定（優先度: 看護師 > 准看護師 > 理学療法士等）
+    const hasKangoshi = staffQuals.some(q => q === '看護師' || q === '正看護師');
+    const hasJunKangoshi = staffQuals.some(q => q === '准看護師');
+    const hasRigaku = staffQuals.some(q =>
+      q.includes('理学療法士') || q.includes('作業療法士') || q.includes('言語聴覚士')
+    );
+
+    // --- 資格制限チェック ---
+    // 医療+リハビリ: 理学療法士等のみ（看護師/准看護師はエラー）
+    if (!isKaigo && !isSeishin && isRehab) {
+      if (!hasRigaku && (hasKangoshi || hasJunKangoshi)) {
         throw new Error(
           `医療リハビリ資格制限: ${record.staffName} は看護師/准看護師のため医療リハビリに対応できません。` +
           '理学療法士/作業療法士/言語聴覚士のみ可能です。'
         );
       }
+    }
 
-      if (hasRigaku) {
-        await this.selectQualificationInFrame(nav, 'rigaku');
-        logger.debug(`Step 7.5: 資格選択 → 理学療法士等 (${record.staffName})`);
+    // 精神+通常+複数人(主/副)+Q=false: 主は看護師のみ（准/理学→エラー）
+    if (isSeishin && record.serviceType2.startsWith('通常') &&
+        ['複数人(主)', '複数人(副)'].includes(pCol) && !qTruthy) {
+      if (pCol === '複数人(主)' && !hasKangoshi) {
+        throw new Error(
+          `精神科複数人資格制限: ${record.staffName} — 精神+複数人(主)は看護師のみ可。` +
+          '准看護師/理学療法士等はエラー対象です。'
+        );
       }
-      return;
     }
 
-    // 通常/緊急: 看護師 > 准看護師 > 理学療法士等 の優先順位
-    const hasKangoshi = staffQuals.some(q => q === '看護師' || q === '正看護師');
-    const hasJunKangoshi = staffQuals.some(q => q === '准看護師');
-    const hasRigakuForNormal = staffQuals.some(q =>
-      q.includes('理学療法士') || q.includes('作業療法士') || q.includes('言語聴覚士')
-    );
+    // --- searchKbn (資格ラジオ) 決定 ---
+    let qualType: 'kangoshi' | 'junkangoshi' | 'rigaku';
 
-    if (hasKangoshi) {
-      await this.selectQualificationInFrame(nav, 'kangoshi');
-      logger.debug(`Step 7.5: 資格選択 → 看護師等 (${record.staffName})`);
-    } else if (hasJunKangoshi) {
-      await this.selectQualificationInFrame(nav, 'junkangoshi');
-      logger.debug(`Step 7.5: 資格選択 → 准看護師等 (${record.staffName})`);
-    } else if (hasRigakuForNormal) {
-      await this.selectQualificationInFrame(nav, 'rigaku');
-      logger.debug(`Step 7.5: 資格選択 → 理学療法士等 (${record.staffName})`);
+    if (!isKaigo && !isSeishin && isRehab) {
+      // 医療+リハビリ: 理学療法士等固定 (ROW 28)
+      qualType = 'rigaku';
+    } else if (isSeishin && isRehab) {
+      // 精神+リハビリ: 全資格OK → 優先順位で判定 (ROW 52-62)
+      if (hasKangoshi) qualType = 'kangoshi';
+      else if (hasJunKangoshi) qualType = 'junkangoshi';
+      else if (hasRigaku) qualType = 'rigaku';
+      else return;
+    } else {
+      // 介護+通常/緊急, 医療+通常/緊急, 精神+通常/緊急: 看護師 > 准看護師 > 理学療法士等
+      if (hasKangoshi) qualType = 'kangoshi';
+      else if (hasJunKangoshi) qualType = 'junkangoshi';
+      else if (hasRigaku) qualType = 'rigaku';
+      else return;
     }
+
+    // --- k2_3a チェックボックス決定 ---
+    const checkboxes: {
+      flag2?: boolean;            // 緊急
+      pluralnurseflag1?: boolean; // 複数名訪問
+      pluralnurseflag2?: boolean; // 複数名訪問(二)
+    } = {};
+
+    // flag2=緊急: 精神+緊急+加算対象のみ (ROW 50)
+    if (isSeishin && isKinkyu && isKasanTaisho) {
+      checkboxes.flag2 = true;
+    }
+
+    // pluralnurseflag1=複数名訪問: 通常+複数人(主/副/看護+介護)+Q=false
+    //   介護 ROW 4-5,7 / 医療 ROW 20,22,24 / 精神 ROW 44,46,48
+    if (record.serviceType2.startsWith('通常') &&
+        ['複数人(主)', '複数人(副)', '複数人(看護+介護)'].includes(pCol) && !qTruthy) {
+      checkboxes.pluralnurseflag1 = true;
+    }
+
+    // pluralnurseflag2=複数名訪問(二): (支援者/複数人(主)/看護+介護/複数人(副))+Q=true
+    //   介護 ROW 8-10 / 医療 ROW 17,21,25 / 精神 ROW 41,45,49,58,60,62
+    if (['支援者', '複数人(主)', '複数人(看護+介護)', '複数人(副)'].includes(pCol) && qTruthy) {
+      checkboxes.pluralnurseflag2 = true;
+    }
+
+    // --- 実行: searchKbn + checkboxes → 検索 ---
+    await this.selectQualificationInFrame(nav, qualType, checkboxes);
+    logger.debug(`Step 7.5: 資格選択 → ${qualType} (${record.staffName})` +
+      (checkboxes.flag2 ? ' [flag2=緊急]' : '') +
+      (checkboxes.pluralnurseflag1 ? ' [複数名訪問]' : '') +
+      (checkboxes.pluralnurseflag2 ? ' [複数名訪問(二)]' : ''));
   }
 
   /**
-   * k2_3a フレーム内で資格ラジオボタン(searchKbn)を選択し、検索ボタンをクリック
+   * k2_3a フレーム内で searchKbn ラジオボタン + チェックボックスを設定し、検索を実行
    *
-   * 実際の HAM HTML:
-   *   <input type="radio" name="searchKbn" value="1" checked>看護師等
-   *   <input type="radio" name="searchKbn" value="2">准看護師
-   *   <input type="radio" name="searchKbn" value="3">理学療法士等
-   *   <input type="button" value="検索" onclick="submitTargetForm(this.form, 'change_flag')">
-   *
-   * 旧実装は name.includes('shikaku') で検索していたが HAM HTML は searchKbn を使用するため
-   * 常にマッチせず、全件デフォルト看護師等で登録されていた（根本原因バグ）。
+   * HAM HTML (k2_3a):
+   *   searchKbn: 1=看護師等, 2=准看護師, 3=理学療法士等, 4=悪性腫瘍, 5=外泊, 6=緊急加算のみ, 99=すべて
+   *   flag2: 緊急, longcareflag: 長時間, infantcareflag: 乳幼児
+   *   pluralnurseflag1: 複数名訪問, pluralnurseflag2: 複数名訪問(二)
+   *   検索ボタン: onclick="submitTargetForm(this.form, 'act_change')"
    */
   private async selectQualificationInFrame(
     nav: HamNavigator,
     qualType: 'kangoshi' | 'junkangoshi' | 'rigaku',
+    checkboxes?: {
+      flag2?: boolean;
+      pluralnurseflag1?: boolean;
+      pluralnurseflag2?: boolean;
+    },
   ): Promise<void> {
     const valueMap: Record<string, string> = {
       kangoshi: '1',
@@ -2135,18 +2242,31 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     const frame = await nav.getMainFrame('k2_3a');
 
-    // searchKbn ラジオボタンを選択
-    await frame.evaluate((val) => {
+    // searchKbn ラジオボタンを選択 + チェックボックスを設定
+    await frame.evaluate((args: { searchKbnValue: string; cbs: { flag2?: boolean; pluralnurseflag1?: boolean; pluralnurseflag2?: boolean } }) => {
+      // searchKbn ラジオボタン
       const radios = document.querySelectorAll('input[name="searchKbn"]');
       for (const radio of Array.from(radios)) {
         const r = radio as HTMLInputElement;
-        if (r.value === val) {
+        if (r.value === args.searchKbnValue) {
           r.checked = true;
           r.dispatchEvent(new Event('change', { bubbles: true }));
           break;
         }
       }
-    }, targetValue);
+
+      // チェックボックス設定
+      const setCheckbox = (name: string, checked: boolean) => {
+        const cb = document.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
+        if (cb) {
+          cb.checked = checked;
+          if (checked) cb.value = '1';
+        }
+      };
+      if (args.cbs.flag2) setCheckbox('flag2', true);
+      if (args.cbs.pluralnurseflag1) setCheckbox('pluralnurseflag1', true);
+      if (args.cbs.pluralnurseflag2) setCheckbox('pluralnurseflag2', true);
+    }, { searchKbnValue: targetValue, cbs: checkboxes || {} });
 
     // 検索ボタンをクリックしてフィルタ結果を表示
     await frame.evaluate(() => {

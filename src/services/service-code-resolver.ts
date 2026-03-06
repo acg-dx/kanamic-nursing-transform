@@ -6,14 +6,21 @@
  *
  * 決定要素:
  *   - showflag: 1=介護, 2=予防, 3=医療/精神医療
- *   - servicetype: サービス種類コード (e.g. "13" = 訪問看護)
- *   - serviceitem: サービス項目コード (e.g. "1111")
+ *   - servicetype: サービス種類コード (e.g. "93" = 訪問看護)
+ *   - serviceitem: サービス項目コード (e.g. "1001")
  *   - longcareflag: 介護保険フラグ ("0" or "1")
  *   - pluralnurseflag1: 複数名訪問加算フラグ ("0" or "1")
  *   - pluralnurseflag2: 同行事務員フラグ ("0" or "1")
  *   - useI5Page: true の場合、k2_3 フローではなく k2_7_1 (訪看I5入力) を使用
  *
  * 転記処理詳細.xlsx の全組み合わせ表に基づく。
+ *
+ * textPattern はサービス選択の主要手段。servicetype#serviceitem は searchKbn フィルタ
+ * 状態によって変動するため、textPattern でのテキスト部分一致を一次手段とし、
+ * servicetype#serviceitem は参考値として保持する。
+ *
+ * textRequire: textPattern 一致後、さらにこの文字列を含む行のみを候補とする。
+ *   例: 緊急+加算対象 → textRequire='・緊急' で「・緊急」を含むサービスのみ選択。
  */
 import type { TranscriptionRecord } from '../types/spreadsheet.types';
 
@@ -39,9 +46,20 @@ export interface ServiceCodeResult {
   setUrgentFlag: boolean;
   /**
    * HAM k2_3a テキストマッチパターン（radio 行テキストに部分一致検索）
-   * servicetype#serviceitem が不一致の場合のフォールバックに使用
+   *
+   * searchKbn フィルタ状態により servicetype#serviceitem が変わるため、
+   * テキストパターンを一次選択手段とする。
+   *
+   * 医療: '訪問看護基本療養費（Ⅰ・Ⅱ）' — 精神科（Ⅰ・Ⅲ）とは Ⅱ/Ⅲ で区別
+   * 精神: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）'
    */
   textPattern: string;
+  /**
+   * textPattern 一致後の追加必須パターン。
+   * これが設定されている場合、textPattern AND textRequire 両方を含む行のみ候補とする。
+   * 例: 緊急+加算対象 → textRequire='・緊急'
+   */
+  textRequire?: string;
 }
 
 /**
@@ -55,61 +73,67 @@ export class ServiceCodeResolver {
    */
   resolve(record: TranscriptionRecord): ServiceCodeResult {
     const { serviceType1, serviceType2 } = record;
-    const hasAccompany = ServiceCodeResolver.isTruthy(record.accompanyCheck);
-    const hasMultipleVisit = ServiceCodeResolver.isTruthy(record.multipleVisit);
     const hasEmergency = ServiceCodeResolver.isTruthy(record.emergencyFlag);
-    const hasAccompanyClerk = ServiceCodeResolver.isTruthy(record.accompanyClerkCheck);
-    // emergencyClerkCheck は現在のマッピングでは使用しないが将来用に保持
+    const qTruthy = ServiceCodeResolver.isTruthy(record.multipleVisit);
 
-    // 共通フラグ
+    // P列: 具体的な値（同行者/複数人(主)/複数人(副)/複数人(看護+介護)/支援者/空欄）
+    const pCol = record.accompanyClerkCheck?.trim() || '';
+
+    // R列: 緊急時の加算対象判定（医療/精神医療のみ使用）
+    const emergencyClerkCheck = record.emergencyClerkCheck?.trim() || '';
+    const isKasanTaisho = emergencyClerkCheck === '加算対象';
+
+    // 共通フラグ計算（転記処理詳細.xlsx 全組み合わせ表に基づく正確な条件）
     const longcareflag = serviceType1 === '介護' ? '1' : '0';
-    const pluralnurseflag1 = hasMultipleVisit ? '1' : '0';
-    const pluralnurseflag2 = hasAccompanyClerk ? '1' : '0';
-    const setUrgentFlag = hasEmergency;
+
+    // pluralnurseflag1=複数名訪問: P∈{複数人(主/副/看護+介護)} AND Q=FALSE
+    //   ROW 4-5,7(介護), ROW 20,22,24(医療), ROW 44,46,48(精神)
+    const isMultiNurseP = ['複数人(主)', '複数人(副)', '複数人(看護+介護)'].includes(pCol);
+    const pluralnurseflag1 = (isMultiNurseP && !qTruthy) ? '1' : '0';
+
+    // pluralnurseflag2=複数名訪問(二): P∈{支援者,複数人(主),複数人(看護+介護)} AND Q=TRUE
+    //   ROW 8-10(介護), ROW 17,21,25(医療), ROW 41,45,49(精神)
+    const isSupporterOrMulti = ['支援者', '複数人(主)', '複数人(看護+介護)'].includes(pCol);
+    const pluralnurseflag2 = (isSupporterOrMulti && qTruthy) ? '1' : '0';
+
+    // 緊急時加算フラグ (k2_2 urgentflags):
+    //   介護: O列(emergencyFlag) 基準
+    //   医療/精神医療: O列=true AND R列='加算対象' のときのみ ON
+    const setUrgentFlag = serviceType1 === '介護'
+      ? hasEmergency
+      : (hasEmergency && isKasanTaisho);
+
+    const flags = { longcareflag, pluralnurseflag1, pluralnurseflag2, setUrgentFlag };
 
     // ========== 介護 + リハビリ → k2_7_1 (訪看I5) ==========
     if (serviceType1 === '介護' && serviceType2 === 'リハビリ') {
       return {
-        showflag: '1',
-        servicetype: '',
-        serviceitem: '',
-        longcareflag: '1',
-        pluralnurseflag1,
-        pluralnurseflag2,
+        showflag: '1', servicetype: '', serviceitem: '',
+        longcareflag: '1', pluralnurseflag1, pluralnurseflag2,
         useI5Page: true,
         description: '訪看I5（介護リハビリ）— k2_7_1ページで入力',
-        setUrgentFlag,
-        textPattern: '',
+        setUrgentFlag, textPattern: '',
       };
     }
 
     // ========== 医療 ==========
     if (serviceType1 === '医療') {
-      return this.resolveIryo(serviceType2, hasAccompany, hasMultipleVisit, hasAccompanyClerk, {
-        longcareflag: '0',
-        pluralnurseflag1,
-        pluralnurseflag2,
-        setUrgentFlag,
+      return this.resolveIryo(serviceType2, isKasanTaisho, {
+        ...flags, longcareflag: '0',
       });
     }
 
     // ========== 精神医療 ==========
     if (serviceType1 === '精神医療') {
-      return this.resolveSeishin(serviceType2, hasAccompany, hasMultipleVisit, {
-        longcareflag: '0',
-        pluralnurseflag1,
-        pluralnurseflag2,
-        setUrgentFlag,
+      return this.resolveSeishin(serviceType2, isKasanTaisho, {
+        ...flags, longcareflag: '0',
       });
     }
 
     // ========== 介護（リハビリ以外） ==========
     if (serviceType1 === '介護') {
-      return this.resolveKaigo(serviceType2, hasAccompany, hasMultipleVisit, hasAccompanyClerk, {
-        longcareflag: '1',
-        pluralnurseflag1,
-        pluralnurseflag2,
-        setUrgentFlag,
+      return this.resolveKaigo(serviceType2, pCol, qTruthy, {
+        ...flags, longcareflag: '1',
       });
     }
 
@@ -122,67 +146,114 @@ export class ServiceCodeResolver {
   /**
    * 医療保険 (showflag=3) のサービスコード決定
    *
-   * HAM 実機検証済コード (2026-02-26 姶良):
-   *   93#1001 = 訪問看護基本療養費（Ⅰ・Ⅱ）
-   *   93#1225 = 精神科訪問看護基本療養費（Ⅰ・Ⅲ）
+   * 転記処理詳細 全組み合わせ表 ROW 15-38:
+   *   通常/リハビリ: textPattern='訪問看護基本療養費（Ⅰ・Ⅱ）' で最短一致 → base サービス
+   *   緊急+加算対象: textRequire='・緊急' で ・緊急 suffix 付きサービスを選択
+   *   緊急+加算対象外: textPattern のみ → 最短一致で base（・緊急なし）を選択
    *
-   * textPattern で行テキスト部分一致のフォールバックを併用し、
-   * コードが事業所や時期で変わっても対応可能にする。
+   * textPattern で（Ⅰ・Ⅱ）を含めることで、精神科（Ⅰ・Ⅲ）との混在を防ぐ。
+   * servicetype#serviceitem は searchKbn フィルタ状態で変動するため参考値。
    */
   private resolveIryo(
     serviceType2: string,
-    hasAccompany: boolean,
-    hasMultipleVisit: boolean,
-    hasAccompanyClerk: boolean,
+    isKasanTaisho: boolean,
     flags: Pick<ServiceCodeResult, 'longcareflag' | 'pluralnurseflag1' | 'pluralnurseflag2' | 'setUrgentFlag'>,
   ): ServiceCodeResult {
     const base = { showflag: '3', useI5Page: false, ...flags };
+    // 医療の textPattern: （Ⅰ・Ⅱ）で精神科（Ⅰ・Ⅲ）と区別
+    const iryo = '訪問看護基本療養費（Ⅰ・Ⅱ）';
 
-    if (serviceType2 === '緊急') {
-      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（緊急時加算あり）' };
-    }
-
-    if (serviceType2 === 'リハビリ') {
-      if (hasMultipleVisit) {
-        return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（理学療法等・複数名）' };
+    // --- 緊急 (ROW 26-27) ---
+    if (serviceType2.startsWith('緊急')) {
+      if (isKasanTaisho) {
+        // ROW 26: 加算対象 → ・緊急 suffix 付きサービスを選択
+        return {
+          ...base, servicetype: '93', serviceitem: '1001',
+          textPattern: iryo, textRequire: '・緊急',
+          description: '訪問看護基本療養費（Ⅰ・Ⅱ）・緊急（加算対象）',
+        };
       }
-      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（理学療法等）' };
+      // ROW 27: 加算対象外 → base（・緊急なし）/ urgentflags OFF（flags.setUrgentFlag は既に false）
+      return {
+        ...base, servicetype: '93', serviceitem: '1001',
+        textPattern: iryo,
+        description: '訪問看護基本療養費（Ⅰ・Ⅱ）（加算対象外）',
+      };
     }
 
-    // 通常
-    if (hasAccompany) {
-      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（同行）' };
+    // --- リハビリ (ROW 28) --- 理学療法士等のみ可（資格チェックは selectQualificationCheckbox で実施）
+    if (serviceType2 === 'リハビリ') {
+      return {
+        ...base, servicetype: '93', serviceitem: '1001',
+        textPattern: iryo,
+        description: '訪問看護基本療養費（Ⅰ・Ⅱ）（理学療法等）',
+      };
     }
-    if (hasMultipleVisit || hasAccompanyClerk) {
-      return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（複数名）' };
-    }
-    return { ...base, servicetype: '93', serviceitem: '1001', textPattern: '訪問看護基本療養費', description: '訪問看護基本療養費（Ⅰ・Ⅱ）' };
+
+    // --- 通常 (ROW 15-25) ---
+    return {
+      ...base, servicetype: '93', serviceitem: '1001',
+      textPattern: iryo,
+      description: '訪問看護基本療養費（Ⅰ・Ⅱ）',
+    };
   }
 
   /**
    * 精神医療 (showflag=3) のサービスコード決定
    *
-   * HAM 実機検証済コード: 93#1225 = 精神科訪問看護基本療養費（Ⅰ・Ⅲ）
+   * 転記処理詳細 全組み合わせ表 ROW 39-62:
+   *   通常/リハビリ: textPattern='精神科訪問看護基本療養費（Ⅰ・Ⅲ）' で最短一致
+   *   緊急+加算対象: textRequire='・緊急' で ・緊急 suffix 付きサービスを選択
+   *     ※ k2_3a の flag2=緊急 checkbox は selectQualificationCheckbox で設定
+   *   緊急+加算対象外 (ROW 51): ★特例★ 医療の textPattern '訪問看護基本療養費（Ⅰ・Ⅱ）' を使用
+   *     spec 原文: 「①訪問看護基本療養費（Ⅰ・Ⅱ）②・准 ③（理学療法士等）」
    */
   private resolveSeishin(
     serviceType2: string,
-    hasAccompany: boolean,
-    hasMultipleVisit: boolean,
+    isKasanTaisho: boolean,
     flags: Pick<ServiceCodeResult, 'longcareflag' | 'pluralnurseflag1' | 'pluralnurseflag2' | 'setUrgentFlag'>,
   ): ServiceCodeResult {
     const base = { showflag: '3', useI5Page: false, ...flags };
+    // 精神科の textPattern: （Ⅰ・Ⅲ）で医療（Ⅰ・Ⅱ）と区別
+    const seishin = '精神科訪問看護基本療養費（Ⅰ・Ⅲ）';
+    // ROW 51 特例: 精神+緊急+加算対象外は医療のサービスを使用
+    const iryo = '訪問看護基本療養費（Ⅰ・Ⅱ）';
 
-    if (serviceType2 === '緊急') {
-      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（緊急時加算あり）' };
+    // --- 緊急 (ROW 50-51) ---
+    if (serviceType2.startsWith('緊急')) {
+      if (isKasanTaisho) {
+        // ROW 50: 加算対象 → flag2=緊急 + ・緊急 suffix（flag2 は selectQualificationCheckbox で設定）
+        return {
+          ...base, servicetype: '93', serviceitem: '1225',
+          textPattern: seishin, textRequire: '・緊急',
+          description: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）・緊急（加算対象）',
+        };
+      }
+      // ROW 51: ★加算対象外 → 医療の基本療養費（Ⅰ・Ⅱ）を選択★
+      return {
+        ...base, servicetype: '93', serviceitem: '1001',
+        textPattern: iryo,
+        description: '訪問看護基本療養費（Ⅰ・Ⅱ）（精神緊急・加算対象外 → 医療サービス使用）',
+      };
     }
 
-    if (hasAccompany) {
-      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（同行）' };
+    // --- リハビリ (ROW 52-62) ---
+    // ★医療リハビリと異なり、精神リハビリは看護師/准看護師も可★
+    // 資格制限チェックは selectQualificationCheckbox で serviceType1 を考慮して実施
+    if (serviceType2 === 'リハビリ') {
+      return {
+        ...base, servicetype: '93', serviceitem: '1225',
+        textPattern: seishin,
+        description: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）（リハビリ）',
+      };
     }
-    if (hasMultipleVisit) {
-      return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（複数名）' };
-    }
-    return { ...base, servicetype: '93', serviceitem: '1225', textPattern: '精神科訪問看護基本療養費', description: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）' };
+
+    // --- 通常 (ROW 39-49) ---
+    return {
+      ...base, servicetype: '93', serviceitem: '1225',
+      textPattern: seishin,
+      description: '精神科訪問看護基本療養費（Ⅰ・Ⅲ）',
+    };
   }
 
   /**
@@ -191,41 +262,38 @@ export class ServiceCodeResolver {
    * HAM 実機検証済コード (2026-02-27 姶良):
    *   13#1211 = 訪看Ⅰ３（看護師）
    *   13#1221 = 訪看Ⅰ３・准（准看護師）
-   *   13#1217 = 訪看Ⅰ３・複１１（複数名・看護師副）
-   *   13#1250 = 訪看Ⅰ３・複２１（複数名・他副）
+   *   13#1217 = 訪看Ⅰ３・複１１（複数名訪問・pluralnurseflag1）
+   *   13#1250 = 訪看Ⅰ３・複２１（複数名訪問(二)・pluralnurseflag2）
    *
-   * ※スタッフ資格による 訪看Ⅰ３ / 訪看Ⅰ３・准 の振り分けは
-   *   将来の資格判定機能で対応予定。現時点では 訪看Ⅰ３（看護師）をデフォルトとし、
-   *   textPattern で最短一致させる。
+   * サービスコード選択条件（転記処理詳細 ROW 1-12）:
+   *   - 緊急 (ROW 12): textPattern='訪看Ⅰ３'
+   *   - P∈{複数人(主/副/看護+介護)} + Q=FALSE (ROW 4-7): textPattern='訪看Ⅰ３'
+   *     → searchKbn + pluralnurseflag1 で正しい複１１を選択
+   *   - P∈{支援者,複数人(主),看護+介護} + Q=TRUE (ROW 8-10): textPattern='訪看Ⅰ３'
+   *     → searchKbn + pluralnurseflag2 で正しい複２１を選択
+   *   - 通常 P=空 (ROW 1-2): textPattern='訪看Ⅰ３'
+   *
+   * ★資格区分（看護師/准看護師）は selectQualificationCheckbox の searchKbn で制御★
+   * searchKbn=2(准看護師) にすると、k2_3a のサービス一覧が准看護師用に
+   * フィルタリングされ、textPattern='訪看Ⅰ３' が「訪看Ⅰ３・准」に一致する。
    */
   private resolveKaigo(
     serviceType2: string,
-    hasAccompany: boolean,
-    hasMultipleVisit: boolean,
-    hasAccompanyClerk: boolean,
+    pCol: string,
+    qTruthy: boolean,
     flags: Pick<ServiceCodeResult, 'longcareflag' | 'pluralnurseflag1' | 'pluralnurseflag2' | 'setUrgentFlag'>,
   ): ServiceCodeResult {
     const base = { showflag: '1', useI5Page: false, ...flags };
 
-    if (serviceType2 === '緊急') {
-      // 緊急時加算は k2_2 の urgentflags チェックで対応。サービスコード自体は通常と同じ。
-      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（緊急時加算あり）' };
+    // 緊急 (ROW 12): urgentflags は setUrgentFlag で制御済み
+    if (serviceType2.startsWith('緊急')) {
+      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（緊急）' };
     }
 
-    if (hasAccompany) {
-      // 同行 → 通常と同じコード（同行は転記対象外の場合もあるが、フォールバック）
-      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（同行）' };
-    }
-    if (hasMultipleVisit) {
-      // 複数名訪問: 副が看護師等 → 複１１、副が他 → 複２１
-      // 現時点ではデフォルト複１１。textPattern で最短一致フォールバック。
-      return { ...base, servicetype: '13', serviceitem: '1217', textPattern: '訪看Ⅰ３・複１１', description: '訪看Ⅰ３・複１１（複数名）' };
-    }
-    if (hasAccompanyClerk) {
-      // 同行事務員（複数名(二)）→ 複２１
-      return { ...base, servicetype: '13', serviceitem: '1250', textPattern: '訪看Ⅰ３・複２１', description: '訪看Ⅰ３・複２１（複数名・他）' };
-    }
-    // 通常: 看護師 → 訪看Ⅰ３ (13#1211)
+    // 通常 (ROW 1-10): P列+Q列 の組み合わせで分岐
+    // ※同行者は isTranscriptionTarget で既にフィルタ済み（ここに到達しない）
+    // pluralnurseflag1/2 は flags に正しい値が含まれている（resolve() で計算済み）
+    // サービスコード textPattern は共通 '訪看Ⅰ３' — searchKbn で資格フィルタ後に正しい行にマッチ
     return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３' };
   }
 

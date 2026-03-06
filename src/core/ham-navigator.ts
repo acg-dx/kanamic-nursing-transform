@@ -327,11 +327,13 @@ export class HamNavigator {
    * @param serviceType - 完全一致で検索。見つからなければテキストマッチにフォールバック
    * @param serviceItem - 完全一致で検索
    * @param textPattern - テキストマッチ用パターン（部分一致）。空なら値一致のみ
+   * @param textRequire - textPattern 一致後の追加必須パターン。設定時は両方を含む行のみ候補とする。
+   *   例: 緊急+加算対象 → textRequire='・緊急' で「・緊急」含む行を優先選択。
    */
-  async selectServiceCode(serviceType: string, serviceItem: string, frame?: Frame, textPattern?: string): Promise<void> {
+  async selectServiceCode(serviceType: string, serviceItem: string, frame?: Frame, textPattern?: string, textRequire?: string): Promise<void> {
     const mainFrame = frame || await this.getMainFrame();
 
-    const result = await mainFrame.evaluate(({ type, item, pattern }) => {
+    const result = await mainFrame.evaluate(({ type, item, pattern, require }) => {
       const form = document.forms[0];
       if (!form) throw new Error('form not found in k2_3a');
 
@@ -344,9 +346,10 @@ export class HamNavigator {
 
       // 方法2: テキストパターンマッチ（改善版）
       // 「減算」「超過」「加算」等の調整項目を避け、基本サービスを優先する。
-      // 複数候補がある場合は行テキストが最短のもの（＝最も基本的なサービス）を選ぶ。
+      // require が指定されている場合、pattern AND require 両方を含む行のみを候補とする。
+      // require 未指定の場合は、行テキストが最短のもの（＝最も基本的なサービス）を選ぶ。
       if (!target && pattern) {
-        const adjustmentKeywords = ['減算', '超過', '加算', '移行'];
+        const adjustmentKeywords = ['減算', '超過', '移行'];
         let bestCandidate: HTMLInputElement | null = null;
         let bestLength = Infinity;
         for (const r of radios) {
@@ -354,6 +357,8 @@ export class HamNavigator {
           const tr = r.closest('tr');
           const rowText = tr?.textContent?.trim() || '';
           if (!rowText.includes(pattern)) continue;
+          // textRequire: 追加必須パターン（例: '・緊急'）
+          if (require && !rowText.includes(require)) continue;
           // 調整項目は後回し
           const isAdjustment = adjustmentKeywords.some(kw => rowText.includes(kw));
           if (isAdjustment) continue;
@@ -363,8 +368,20 @@ export class HamNavigator {
             bestLength = rowText.length;
           }
         }
-        // 基本サービスが見つからない場合は調整項目もフォールバック対象
+        // フォールバック: require 付きで基本サービスが見つからない → 調整項目も含めて再検索
         if (!bestCandidate) {
+          for (const r of radios) {
+            if (!r.value) continue;
+            const tr = r.closest('tr');
+            const rowText = tr?.textContent?.trim() || '';
+            if (!rowText.includes(pattern)) continue;
+            if (require && !rowText.includes(require)) continue;
+            bestCandidate = r;
+            break;
+          }
+        }
+        // フォールバック2: require なしで pattern のみ再試行（require が原因で候補ゼロの場合）
+        if (!bestCandidate && require) {
           for (const r of radios) {
             if (!r.value) continue;
             const tr = r.closest('tr');
@@ -407,7 +424,7 @@ export class HamNavigator {
       }
 
       return { selected: target.value, method: target.value === exactValue ? 'exact' : 'pattern' };
-    }, { type: serviceType, item: serviceItem, pattern: textPattern || '' });
+    }, { type: serviceType, item: serviceItem, pattern: textPattern || '', require: textRequire || '' });
 
     logger.debug(`selectServiceCode: ${result.selected} (${result.method})`);
   }
