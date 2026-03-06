@@ -692,6 +692,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       await this.sleep(1000);
     }
     await this.sleep(3000);
+
+    if (!confirmClicked) {
+      throw new Error(
+        `スタッフ配置不可：担当スタッフ「${record.staffName}」の確認画面（決定ボタン）が表示されませんでした。` +
+        '同時間帯に他利用者の予定と重複しHAMで選択不可の可能性があります（手動配置が必要）'
+      );
+    }
     logger.debug(`Step 10: スタッフ配置完了 (${choiceResult.staffName})`);
 
     // === Step 10.5: k2_2f で「戻る」→ k2_2 に戻る ===
