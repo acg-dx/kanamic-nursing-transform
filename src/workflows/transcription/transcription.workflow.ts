@@ -431,7 +431,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // === Step 4.5a: 重複チェック — 同一日付+時刻のエントリ状態を確認 ===
     if (record.transcriptionFlag !== '修正あり') {
-      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName);
       if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
@@ -452,7 +452,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // === Step 4.5b: 修正レコードの場合 → 既存スケジュール先行削除 ===
     if (record.transcriptionFlag === '修正あり') {
       logger.info(`修正レコード検出: ${record.recordId} — 既存スケジュールを削除します`);
-      const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime);
+      const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime, record.staffName);
       if (deleted) {
         logger.info(`既存スケジュール削除完了 → 再転記を続行`);
       } else {
@@ -828,7 +828,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     let skipI5Creation = false;
     let skipI5StaffAssignment = false;
     if (record.transcriptionFlag !== '修正あり') {
-      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime);
+      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName);
       if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
@@ -1723,16 +1723,27 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    *          'partial'       — スケジュールあるがスタッフ未配置（部分登録）
    *          'none'          — エントリなし
    */
+  /**
+   * @param staffName スタッフ名（"資格-姓名" 形式）。指定時はスタッフ名一致する行のみを
+   *   重複判定対象とする。同一日付+時刻に別スタッフのエントリがあっても 'none' を返す。
+   *   これにより、同一患者の同一時間帯に複数スタッフの訪問がある場合の誤スキップを防止する。
+   */
   private async checkDuplicateOnK2_2(
     nav: HamNavigator,
     visitDateHam: string,
     startTime: string,
+    staffName?: string,
   ): Promise<'complete' | 'needs_jisseki' | 'partial' | 'none'> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const result = await frame.evaluate(({ dd, st }) => {
+    // staffName から姓を抽出（"看護師-冨迫広美" → "冨迫"）
+    const staffSurname = staffName
+      ? extractPlainName(staffName.split('-')[1] || '').substring(0, 3)
+      : '';
+
+    const result = await frame.evaluate(({ dd, st, surname }) => {
       // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
       const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
       const rows = Array.from(document.querySelectorAll('tr'));
@@ -1755,7 +1766,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         if (hasEdit) {
           // スタッフ配置済みかチェック（td[bgcolor="#DDEEFF"] = 担当スタッフ欄）
           const staffCell = row.querySelector('td[bgcolor="#DDEEFF"]');
-          const hasStaff = !!(staffCell?.textContent?.trim());
+          const staffText = (staffCell?.textContent || '').replace(/[\s\u3000]+/g, '');
+          const hasStaff = !!staffText;
+
+          // スタッフ名フィルタ: 指定されている場合、一致しない行は「別スタッフのエントリ」なのでスキップ
+          if (surname && hasStaff && !staffText.includes(surname)) continue;
+
           if (hasStaff) {
             // 実績チェック: input[name="results"] が checked かつ value="1"
             const resultsCheckbox = row.querySelector('input[name="results"]') as HTMLInputElement | null;
@@ -1769,14 +1785,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
       if (foundNeedsJisseki) return 'needs_jisseki';
       return foundPartial ? 'partial' : 'none';
-    }, { dd: dayDisplay, st: startTime });
+    }, { dd: dayDisplay, st: startTime, surname: staffSurname });
 
     if (result === 'complete') {
-      logger.info(`重複検出（完了済み）: ${dayDisplay} ${startTime} — スケジュール＋スタッフ配置＋実績1。スキップします`);
+      logger.info(`重複検出（完了済み）: ${dayDisplay} ${startTime}${staffSurname ? ` [${staffSurname}]` : ''} — スケジュール＋スタッフ配置＋実績1。スキップします`);
     } else if (result === 'needs_jisseki') {
-      logger.info(`実績未設定検出: ${dayDisplay} ${startTime} — スケジュール＋スタッフ配置済み・実績未設定`);
+      logger.info(`実績未設定検出: ${dayDisplay} ${startTime}${staffSurname ? ` [${staffSurname}]` : ''} — スケジュール＋スタッフ配置済み・実績未設定`);
     } else if (result === 'partial') {
-      logger.info(`部分登録検出: ${dayDisplay} ${startTime} — スケジュールあり・スタッフ未配置`);
+      logger.info(`部分登録検出: ${dayDisplay} ${startTime}${staffSurname ? ` [${staffSurname}]` : ''} — スケジュールあり・スタッフ未配置`);
     }
     return result;
   }
@@ -1790,22 +1806,41 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    *   削除ボタン: <input name="act_delete" type="button" value="削除"
    *               onclick="confirmDelete('{assignid}', '{record2flag}');">
    *   行テキスト: "1日  日  18:00 ～ 18:30  訪問看護基本療養費（Ⅰ・Ⅱ）・夜朝"
+   *   スタッフ欄: td[bgcolor="#DDEEFF"] に担当スタッフ名が表示される
+   *
+   * staffName を指定すると、同一日付+時刻に複数エントリがある場合に
+   * スタッフ名でマッチする行を優先的に削除する（重複キー対策）。
    */
   private async deleteExistingSchedule(
     nav: HamNavigator,
     visitDateHam: string,
     startTime: string,
+    staffName?: string,
   ): Promise<boolean> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const deleteInfo = await frame.evaluate(({ targetDay, st }) => {
+    // staffName から姓を抽出（"看護師-木場亜紗実" → "木場"）
+    const staffSurname = staffName
+      ? extractPlainName(staffName.split('-')[1] || '').substring(0, 3)
+      : '';
+
+    const deleteInfo = await frame.evaluate(({ targetDay, st, surname }) => {
       // HAM k2_2 は rowspan で日付セルを結合するため、日付テキストは日グループの
       // 最初の <tr> にしか存在しない。行を順番に走査し、最後に見つけた日付を追跡する。
       const dayRegex = /(?:^|[^0-9])(\d{1,2})日/;
       const rows = Array.from(document.querySelectorAll('tr'));
       let currentDay = -1;
+
+      interface Candidate {
+        found: true;
+        assignid: string;
+        record2flag: string;
+        rowText: string;
+        staffMatch: boolean;
+      }
+      const candidates: Candidate[] = [];
 
       for (const row of rows) {
         const rowText = row.textContent || '';
@@ -1828,21 +1863,37 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         const m = onclick.match(/confirmDelete\(\s*'(\d+)'\s*,\s*'(\d+)'\s*\)/);
         if (!m) continue;
 
-        return {
+        // スタッフ名チェック（td[bgcolor="#DDEEFF"] = 担当スタッフ欄）
+        const staffCell = row.querySelector('td[bgcolor="#DDEEFF"]');
+        const staffText = (staffCell?.textContent || '').replace(/[\s\u3000]+/g, '');
+        const staffMatch = surname ? staffText.includes(surname) : false;
+
+        candidates.push({
           found: true,
           assignid: m[1],
           record2flag: m[2],
-          rowText: rowText.replace(/\s+/g, ' ').trim().substring(0, 100),
-        };
+          rowText: rowText.replace(/\s+/g, ' ').trim().substring(0, 120),
+          staffMatch,
+        });
       }
-      return { found: false };
-    }, { targetDay: dayNum, st: startTime });
+
+      if (candidates.length === 0) {
+        return { found: false as const, candidateCount: 0, assignid: '', record2flag: '', rowText: '', staffMatch: false };
+      }
+
+      // スタッフ名一致を優先、なければ最初の候補（既存動作と互換）
+      const best = candidates.find(c => c.staffMatch) || candidates[0];
+      return { ...best, candidateCount: candidates.length };
+    }, { targetDay: dayNum, st: startTime, surname: staffSurname });
 
     if (!deleteInfo.found) {
       logger.debug(`削除対象なし: ${dayDisplay} ${startTime}`);
       return false;
     }
 
+    if (deleteInfo.candidateCount > 1) {
+      logger.info(`重複キー検出: ${dayDisplay} ${startTime} に ${deleteInfo.candidateCount} 件のエントリ → スタッフ名「${staffSurname}」で${deleteInfo.staffMatch ? '一致' : 'フォールバック（最初の候補）'}`);
+    }
     logger.info(`既存スケジュール削除: ${deleteInfo.rowText} (assignid=${deleteInfo.assignid})`);
 
     if (deleteInfo.record2flag === '1') {

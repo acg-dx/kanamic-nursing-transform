@@ -19,7 +19,7 @@
 import { BaseWorkflow } from '../base-workflow';
 import { logger } from '../../core/logger';
 import { withRetry } from '../../core/retry-manager';
-import { CJK_VARIANT_MAP_SERIALIZABLE } from '../../core/cjk-normalize';
+import { CJK_VARIANT_MAP_SERIALIZABLE, extractPlainName } from '../../core/cjk-normalize';
 import { toHamDate, toHamMonthStart } from '../../services/time-utils';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError } from '../../types/workflow.types';
@@ -183,7 +183,7 @@ export class DeletionWorkflow extends BaseWorkflow {
 
     // === Step 4: k2_2 で対象スケジュール行を特定して削除ボタンクリック ===
     const visitDateHam = toHamDate(record.visitDate);
-    const deleted = await this.deleteSchedule(nav, visitDateHam, record.startTime);
+    const deleted = await this.deleteSchedule(nav, visitDateHam, record.startTime, record.staffName);
 
     if (!deleted) {
       // HAM に該当スケジュールが存在しない → 削除不要として完了扱い
@@ -235,20 +235,39 @@ export class DeletionWorkflow extends BaseWorkflow {
    *
    * @returns true: 削除ボタンをクリックした（上書き保存が必要）
    *          false: 対象行が見つからない（削除不要として扱う）
+   *
+   * staffName を指定すると、同一日付+時刻に複数エントリがある場合に
+   * スタッフ名でマッチする行を優先的に削除する（重複キー対策）。
    */
   private async deleteSchedule(
     nav: HamNavigator,
     visitDateHam: string,
     startTime: string,
+    staffName?: string,
   ): Promise<boolean> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
 
-    const deleteInfo = await frame.evaluate(({ dd, st }) => {
+    // staffName から姓を抽出（"看護師-木場亜紗実" → "木場"）
+    const staffSurname = staffName
+      ? extractPlainName(staffName.split('-')[1] || '').substring(0, 3)
+      : '';
+
+    const deleteInfo = await frame.evaluate(({ dd, st, surname }) => {
       // 部分一致を防止: "1日" が "11日","21日","31日" にマッチしないよう正規表現で判定
       const dayRegex = new RegExp(`(?:^|[^0-9])${parseInt(dd)}日`);
       const rows = Array.from(document.querySelectorAll('tr'));
+
+      interface Candidate {
+        found: true;
+        assignid: string;
+        record2flag: string;
+        rowText: string;
+        staffMatch: boolean;
+      }
+      const candidates: Candidate[] = [];
+
       for (const row of rows) {
         const rowText = row.textContent || '';
         if (!dayRegex.test(rowText)) continue;
@@ -261,21 +280,37 @@ export class DeletionWorkflow extends BaseWorkflow {
         const m = onclick.match(/confirmDelete\(\s*'(\d+)'\s*,\s*'(\d+)'\s*\)/);
         if (!m) continue;
 
-        return {
+        // スタッフ名チェック（td[bgcolor="#DDEEFF"] = 担当スタッフ欄）
+        const staffCell = row.querySelector('td[bgcolor="#DDEEFF"]');
+        const staffText = (staffCell?.textContent || '').replace(/[\s\u3000]+/g, '');
+        const staffMatch = surname ? staffText.includes(surname) : false;
+
+        candidates.push({
           found: true,
           assignid: m[1],
           record2flag: m[2],
-          rowText: rowText.replace(/\s+/g, ' ').trim().substring(0, 100),
-        };
+          rowText: rowText.replace(/\s+/g, ' ').trim().substring(0, 120),
+          staffMatch,
+        });
       }
-      return { found: false };
-    }, { dd: dayDisplay, st: startTime });
+
+      if (candidates.length === 0) {
+        return { found: false as const, candidateCount: 0, assignid: '', record2flag: '', rowText: '', staffMatch: false };
+      }
+
+      // スタッフ名一致を優先、なければ最初の候補（既存動作と互換）
+      const best = candidates.find(c => c.staffMatch) || candidates[0];
+      return { ...best, candidateCount: candidates.length };
+    }, { dd: dayDisplay, st: startTime, surname: staffSurname });
 
     if (!deleteInfo.found) {
       logger.debug(`削除対象なし: ${dayDisplay} ${startTime}`);
       return false;
     }
 
+    if (deleteInfo.candidateCount > 1) {
+      logger.info(`重複キー検出: ${dayDisplay} ${startTime} に ${deleteInfo.candidateCount} 件 → スタッフ「${staffSurname}」で${deleteInfo.staffMatch ? '一致' : 'フォールバック'}`);
+    }
     logger.info(`削除対象スケジュール検出: ${deleteInfo.rowText} (assignid=${deleteInfo.assignid})`);
 
     if (deleteInfo.record2flag === '1') {

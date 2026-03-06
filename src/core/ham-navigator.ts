@@ -341,8 +341,19 @@ export class HamNavigator {
       if (radios.length === 0) throw new Error('No radio buttons found in k2_3a');
 
       // 方法1: 完全一致（servicetype#serviceitem）
+      // ★ textRequire 指定時は行テキストも検証する。
+      //    resolveKaigo が汎用 serviceitem を返す場合（介護は等級変動するため固定不可）、
+      //    完全一致で別サービスにヒットする可能性がある。
+      //    例: 13#1211 → 訪看Ⅰ３ にヒットするが、准看護師は 訪看Ⅰ３・准 が必要。
       const exactValue = `${type}#${item}`;
-      let target = radios.find(r => r.value === exactValue);
+      let target = radios.find(r => {
+        if (r.value !== exactValue) return false;
+        if (!require) return true;
+        // textRequire が設定されている場合、行テキストにも含まれていることを確認
+        const tr = r.closest('tr');
+        const rowText = tr?.textContent?.trim() || '';
+        return rowText.includes(require);
+      });
 
       // 方法2: テキストパターンマッチ（精准版）
       // - textRequire が指定されている場合は必須条件として扱う（サイレント無視しない）

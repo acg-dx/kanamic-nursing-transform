@@ -224,8 +224,10 @@ function getExpectedPattern(rec: SheetRec, patientMaster?: PatientMasterService)
     }
     // 介護通常/緊急
     const must: string[] = [];
+    const mustNot: string[] = [];
     if (q === '准看護師') must.push('准');
-    return { csvServiceType: expectedServiceType, mustContain: must, mustNotContain: [],
+    else if (q === '看護師' || q === '') mustNot.push('・准');
+    return { csvServiceType: expectedServiceType, mustContain: must, mustNotContain: mustNot,
              description: `${prefix}通常/緊急 → ${isYobo ? '予' : ''}訪看Ⅰ（${q || '看護師'}）` };
   }
 
@@ -235,6 +237,7 @@ function getExpectedPattern(rec: SheetRec, patientMaster?: PatientMasterService)
 
     if (q === '理学療法士等') must.push('理学療法士等');
     else if (q === '准看護師') must.push('准');
+    else if (q === '看護師' || q === '') mustNot.push('・准');
 
     if (st2.startsWith('緊急') && rec.rCol.trim() === '加算対象') {
       must.push('緊急');
@@ -254,23 +257,27 @@ function getExpectedPattern(rec: SheetRec, patientMaster?: PatientMasterService)
     // ROW 51 特例: 精神+緊急+加算対象外 → 医療サービス
     if (st2.startsWith('緊急') && rec.rCol.trim() !== '加算対象') {
       const must = ['訪問看護基本療養費', '（Ⅰ・Ⅱ）'];
+      const mustNot51: string[] = [];
       if (q === '理学療法士等') must.push('理学療法士等');
       else if (q === '准看護師') must.push('准');
-      return { csvServiceType: '看護医療', mustContain: must, mustNotContain: [],
+      else if (q === '看護師' || q === '') mustNot51.push('・准');
+      return { csvServiceType: '看護医療', mustContain: must, mustNotContain: mustNot51,
                description: `精神+緊急+加算対象外 → 医療（Ⅰ・Ⅱ）（${q || '看護師'}）★ROW51特例★` };
     }
 
     const must: string[] = ['精神科訪問看護基本療養費', '（Ⅰ・Ⅲ）'];
+    const mustNotSeishin: string[] = [];
     // 精神+理学 → HAM uses "作業療法士等" (not 理学)
     if (q === '理学療法士等') must.push('作業療法士等');
     else if (q === '准看護師') must.push('准');
+    else if (q === '看護師' || q === '') mustNotSeishin.push('・准');
 
     if (st2.startsWith('緊急') && rec.rCol.trim() === '加算対象') {
       must.push('緊急');
-      return { csvServiceType: '看護医療', mustContain: must, mustNotContain: [],
+      return { csvServiceType: '看護医療', mustContain: must, mustNotContain: mustNotSeishin,
                description: `精神+緊急+加算対象 → 精神科（Ⅰ・Ⅲ）・緊急（${q || '看護師'}）` };
     }
-    return { csvServiceType: '看護医療', mustContain: must, mustNotContain: [],
+    return { csvServiceType: '看護医療', mustContain: must, mustNotContain: mustNotSeishin,
              description: `精神+${st2} → 精神科（Ⅰ・Ⅲ）（${q || '看護師'}）` };
   }
 
@@ -309,7 +316,11 @@ function classifyIssue(rec: SheetRec, csv: CsvRec, expected: ReturnType<typeof g
   // Check mustNotContain
   for (const pat of expected.mustNotContain) {
     if (content.includes(pat)) {
-      issues.push(`D-禁止pattern含有(${pat})`);
+      if (pat === '・准') {
+        issues.push('F2-看護師に准看サービス誤登録');
+      } else {
+        issues.push(`D-禁止pattern含有(${pat})`);
+      }
     }
   }
 
@@ -370,10 +381,20 @@ async function main() {
       continue;
     }
 
-    // Find the best matching CSV row (prefer resultFlag=1, then matching serviceType)
+    // Find the best matching CSV row
+    // Priority: 1) staff name match  2) resultFlag=1
+    // This is critical for duplicate-key cases (same patient+date+startTime, different staff)
+    const staffSurname = rec.staffName.split('-')[1]?.replace(/[\s\u3000]+/g, '') || '';
     let bestCsv = csvMatches[0];
+    let bestScore = 0;
     for (const c of csvMatches) {
-      if (c.resultFlag === '1' && bestCsv.resultFlag !== '1') bestCsv = c;
+      let score = 0;
+      // Staff surname match (highest priority for duplicate keys)
+      const csvStaffNorm = norm(c.staffName);
+      if (staffSurname && csvStaffNorm.includes(norm(staffSurname))) score += 10;
+      // resultFlag=1
+      if (c.resultFlag === '1') score += 1;
+      if (score > bestScore) { bestScore = score; bestCsv = c; }
     }
 
     matchedCount++;
