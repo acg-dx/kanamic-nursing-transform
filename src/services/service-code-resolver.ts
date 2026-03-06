@@ -151,6 +151,8 @@ export class ServiceCodeResolver {
    * 転記処理詳細 全組み合わせ表 ROW 15-38:
    *   通常/リハビリ: textPattern='訪問看護基本療養費（Ⅰ・Ⅱ）' で最短一致 → base サービス
    *   緊急+加算対象: textRequire='・緊急' で ・緊急 suffix 付きサービスを選択
+   *     ※ k2_3a の flag2=緊急 checkbox を ON にすることで HAM が ・緊急 サービスを表示
+   *     ※ flag2 は selectQualificationCheckbox で全保険種別共通に設定
    *   緊急+加算対象外: textPattern のみ → 最短一致で base（・緊急なし）を選択
    *
    * textPattern で（Ⅰ・Ⅱ）を含めることで、精神科（Ⅰ・Ⅲ）との混在を防ぐ。
@@ -169,6 +171,7 @@ export class ServiceCodeResolver {
     if (serviceType2.startsWith('緊急')) {
       if (isKasanTaisho) {
         // ROW 26: 加算対象 → ・緊急 suffix 付きサービスを選択
+        // ★ flag2=緊急 は selectQualificationCheckbox で設定 → HAM が ・緊急 を表示
         return {
           ...base, servicetype: '93', serviceitem: '1001',
           textPattern: iryo, textRequire: '・緊急',

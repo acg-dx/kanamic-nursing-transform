@@ -2205,8 +2205,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       pluralnurseflag2?: boolean; // 複数名訪問(二)
     } = {};
 
-    // flag2=緊急: 精神+緊急+加算対象のみ (ROW 50)
-    if (isSeishin && isKinkyu && isKasanTaisho) {
+    // flag2=緊急: 緊急+加算対象 → k2_3a で ・緊急 サービスを表示するために必須
+    //   医療 ROW 26 / 精神 ROW 50（全保険種別共通）
+    //   ★ flag2 を ON にしないと HAM は ・緊急 付きサービスを候補に表示しない
+    if (isKinkyu && isKasanTaisho) {
       checkboxes.flag2 = true;
     }
 
