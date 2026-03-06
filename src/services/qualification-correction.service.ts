@@ -2,12 +2,18 @@
  * 資格修正マニフェスト生成サービス
  *
  * HAM 8-1 CSV と SmartHR 資格データを突合し、
- * 看護医療の資格誤登録（看護師等 ↔ 准看護師）を検出して修正マニフェストを生成する。
+ * 看護医療の資格誤登録を検出して修正マニフェストを生成する。
+ *
+ * 検出対象:
+ * - 看護師等 ↔ 准看護師 の誤登録
+ * - 理学療法士等 が 看護師等/准看護師 で誤登録されているケース
+ * - 看護師等/准看護師 が 理学療法士等 で誤登録されているケース
  *
  * ビジネスルール:
  * - 看護医療のみ対象（介護保険・予防訪問看護は対象外）
- * - 資格優先度: 看護師 > 准看護師（両方保有時は看護師を適用）
- * - 准看護師識別: サービス内容末尾の「・准」有無
+ * - 資格優先度: 看護師 > 准看護師 > 理学療法士等（上位を優先適用）
+ * - CSV 判定: サービス内容の「・准」有無 + 「理学療法士等」有無
+ * - CSV 開始時刻=終了時刻のレコードは突合対象外
  */
 
 import fs from 'fs';
@@ -26,8 +32,8 @@ export interface CorrectionRecord {
   endTime: string;     // HH:MM
   staffName: string;   // plain name (no qualification prefix)
   currentService: string;  // current service content in HAM
-  targetQualification: '看護師等' | '准看護師';
-  searchKbn: '1' | '2';  // 1=看護師等, 2=准看護師
+  targetQualification: '看護師等' | '准看護師' | '理学療法士等';
+  searchKbn: '1' | '2' | '3';  // 1=看護師等, 2=准看護師, 3=理学療法士等
 }
 
 interface CsvRecord {
@@ -76,10 +82,10 @@ function parseCsv(text: string): CsvRecord[] {
     // テスト患者を除外
     if (['青空太郎', '練習七郎', 'テスト'].some(t => patientName.includes(t))) continue;
 
-    // 無効な時間を除外
+    // 開始時刻=終了時刻のレコードは突合対象外（無効データ）
     const startTime = (cols[2] || '').trim();
     const endTime = (cols[3] || '').trim();
-    if (startTime === '12:00' && endTime === '12:00') continue;
+    if (startTime === endTime) continue;
 
     const serviceContent = (cols[12] || '').trim();
 
@@ -152,21 +158,29 @@ export class QualificationCorrectionService {
         continue;
       }
 
-      // 資格優先度ルール: 看護師 > 准看護師
+      // 資格優先度ルール: 看護師 > 准看護師 > 理学療法士等
       const hasKangoshi = quals.some(q => q === '看護師' || q === '正看護師');
       const hasJunKangoshi = quals.some(q => q === '准看護師');
+      const hasRigaku = quals.some(q =>
+        q.includes('理学療法士') || q.includes('作業療法士') || q.includes('言語聴覚士')
+      );
 
-      if (!hasKangoshi && !hasJunKangoshi) continue; // 看護師系資格なし → スキップ
+      // 正しい searchKbn を決定（優先度順）
+      let correctQual: CorrectionRecord['targetQualification'];
+      let correctKbn: CorrectionRecord['searchKbn'];
+      if (hasKangoshi)        { correctQual = '看護師等';     correctKbn = '1'; }
+      else if (hasJunKangoshi) { correctQual = '准看護師';     correctKbn = '2'; }
+      else if (hasRigaku)      { correctQual = '理学療法士等'; correctKbn = '3'; }
+      else continue; // 看護師系・理学療法士系いずれの資格もなし → スキップ
 
-      const actualQual = hasKangoshi ? '看護師等' : '准看護師';
-      const searchKbn: '1' | '2' = actualQual === '看護師等' ? '1' : '2';
-
-      // 現在の登録状態を判定
-      const isCurrentlyJun = rec.serviceContent.endsWith('・准');
-      const currentQual = isCurrentlyJun ? '准看護師' : '看護師等';
+      // CSV サービス内容から現在の登録 searchKbn を判定
+      let currentKbn: '1' | '2' | '3';
+      if (rec.serviceContent.includes('理学療法士等')) { currentKbn = '3'; }
+      else if (rec.serviceContent.endsWith('・准'))    { currentKbn = '2'; }
+      else                                             { currentKbn = '1'; }
 
       // 不一致を検出
-      if (actualQual !== currentQual) {
+      if (correctKbn !== currentKbn) {
         manifest.push({
           patientName: rec.patientName,
           date: rec.date.replace(/\//g, '-'), // YYYY/MM/DD → YYYY-MM-DD
@@ -174,8 +188,8 @@ export class QualificationCorrectionService {
           endTime: rec.endTime,
           staffName: rec.staffName,
           currentService: rec.serviceContent,
-          targetQualification: actualQual,
-          searchKbn,
+          targetQualification: correctQual,
+          searchKbn: correctKbn,
         });
       }
     }
