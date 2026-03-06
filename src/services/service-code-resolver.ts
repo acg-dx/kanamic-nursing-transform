@@ -259,23 +259,20 @@ export class ServiceCodeResolver {
   /**
    * 介護保険 (showflag=1) のサービスコード決定（リハビリ以外）
    *
-   * HAM 実機検証済コード (2026-02-27 姶良):
-   *   13#1211 = 訪看Ⅰ３（看護師）
-   *   13#1221 = 訪看Ⅰ３・准（准看護師）
-   *   13#1217 = 訪看Ⅰ３・複１１（複数名訪問・pluralnurseflag1）
-   *   13#1250 = 訪看Ⅰ３・複２１（複数名訪問(二)・pluralnurseflag2）
+   * HAM k2_3a のサービス等級は訪問時間に基づいて自動決定される:
+   *   訪看Ⅰ１ = 20分未満, Ⅰ２ = 30分未満, Ⅰ３ = 30分以上1h未満, Ⅰ４ = 1h以上1.5h未満
+   * ※HAM は終了時刻を -1分する（例: 11:30→11:29）ため、
+   *   表面上30分の訪問が29分扱いで Ⅰ２ になるケースがある。
    *
-   * サービスコード選択条件（転記処理詳細 ROW 1-12）:
-   *   - 緊急 (ROW 12): textPattern='訪看Ⅰ３'
-   *   - P∈{複数人(主/副/看護+介護)} + Q=FALSE (ROW 4-7): textPattern='訪看Ⅰ３'
-   *     → searchKbn + pluralnurseflag1 で正しい複１１を選択
-   *   - P∈{支援者,複数人(主),看護+介護} + Q=TRUE (ROW 8-10): textPattern='訪看Ⅰ３'
-   *     → searchKbn + pluralnurseflag2 で正しい複２１を選択
-   *   - 通常 P=空 (ROW 1-2): textPattern='訪看Ⅰ３'
+   * textPattern='訪看Ⅰ' で全等級（Ⅰ１〜Ⅰ４）に対応し、
+   * HAM が表示したサービス一覧から最短一致で基本サービスを選択する。
    *
-   * ★資格区分（看護師/准看護師）は selectQualificationCheckbox の searchKbn で制御★
-   * searchKbn=2(准看護師) にすると、k2_3a のサービス一覧が准看護師用に
-   * フィルタリングされ、textPattern='訪看Ⅰ３' が「訪看Ⅰ３・准」に一致する。
+   * ★資格区分（看護師/准看護師）は selectQualificationCheckbox で制御:
+   *   - searchKbn ラジオ設定（医療/精神では有効だが介護では非対応）
+   *   - textRequire='・准' で介護の准看護師サービスを精准選択
+   *
+   * servicetype#serviceitem は参考値。等級により変動するため、
+   * textPattern + textRequire によるテキストマッチを一次選択手段とする。
    */
   private resolveKaigo(
     serviceType2: string,
@@ -287,14 +284,13 @@ export class ServiceCodeResolver {
 
     // 緊急 (ROW 12): urgentflags は setUrgentFlag で制御済み
     if (serviceType2.startsWith('緊急')) {
-      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３（緊急）' };
+      return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ', description: '訪看Ⅰ（緊急）' };
     }
 
     // 通常 (ROW 1-10): P列+Q列 の組み合わせで分岐
     // ※同行者は isTranscriptionTarget で既にフィルタ済み（ここに到達しない）
     // pluralnurseflag1/2 は flags に正しい値が含まれている（resolve() で計算済み）
-    // サービスコード textPattern は共通 '訪看Ⅰ３' — searchKbn で資格フィルタ後に正しい行にマッチ
-    return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ３', description: '訪看Ⅰ３' };
+    return { ...base, servicetype: '13', serviceitem: '1211', textPattern: '訪看Ⅰ', description: '訪看Ⅰ' };
   }
 
   /**

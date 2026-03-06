@@ -301,13 +301,13 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         if (careType === '予防') {
           logger.info(
             `介護度判定: ${record.patientName} は${patient.careLevel} → 予防モード ` +
-            `(showflag=${codeResult.showflag}→2, textPattern=${codeResult.textPattern}→予訪看Ⅰ３)`,
+            `(showflag=${codeResult.showflag}→2, textPattern=${codeResult.textPattern}→予訪看Ⅰ)`,
           );
           codeResult.showflag = '2';
           codeResult.servicetype = '63';
-          // HAM k2_3a showflag=2 のサービス一覧: '予訪看Ⅰ３' (CSV実績: '予訪看Ⅰ５' の命名規則に準拠)
-          if (codeResult.textPattern === '訪看Ⅰ３') {
-            codeResult.textPattern = '予訪看Ⅰ３';
+          // HAM k2_3a showflag=2 のサービス一覧: '予訪看Ⅰ{N}' (等級は時間帯依存)
+          if (codeResult.textPattern === '訪看Ⅰ') {
+            codeResult.textPattern = '予訪看Ⅰ';
           }
         }
       }
@@ -2092,7 +2092,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    * k2_3a でスタッフ資格に基づく searchKbn ラジオボタン + チェックボックスを選択
    *
    * ★全保険種別対応（介護/医療/精神医療）★
-   * 介護 (showflag=1): searchKbn で看護師/准看護師を区別（訪看Ⅰ３ vs ・准）
+   * 介護 (showflag=1): searchKbn 非対応 → textRequire='・准' で准看護師を精准選択
    * 医療 (showflag=3): searchKbn + checkbox で資格フィルタ
    * 精神 (showflag=3): 同上 + flag2(緊急)
    *
@@ -2227,18 +2227,15 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.selectQualificationInFrame(nav, qualType, checkboxes);
 
     // ★ 介護 (showflag=1/2) 精准一致: searchKbn フィルタが効かないため、
-    //   方法1: serviceitem を資格別コードに更新 → 完全一致で直接選択
-    //   方法2: textRequire で候補をフィルタ → テキストマッチの安全網
+    //   textRequire='・准' で准看護師サービスのみに候補を限定する。
+    //   serviceitem は等級依存（Ⅰ２=1121, Ⅰ３=1221 等）で固定不可のため、
+    //   textPattern + textRequire によるテキストマッチを一次選択手段とする。
     //
-    // 介護サービス一覧 (searchKbn 非対応のため全件表示):
-    //   13#1211 / 63#1211 → 訪看Ⅰ３ / 予訪看Ⅰ３         (看護師)
-    //   13#1221 / 63#1221 → 訪看Ⅰ３・准 / 予訪看Ⅰ３・准   (准看護師)
-    if (isKaigo && qualType === 'junkangoshi') {
-      codeResult.serviceitem = '1221';
-      if (!codeResult.textRequire) {
-        codeResult.textRequire = '・准';
-      }
-      logger.debug(`介護+准看護師: serviceitem→1221, textRequire='・准' (精准一致)`);
+    // 例: textPattern='訪看Ⅰ' + textRequire='・准'
+    //   → 訪看Ⅰ２・准, 訪看Ⅰ３・准 等がマッチ → 最短一致で基本サービスを選択
+    if (isKaigo && qualType === 'junkangoshi' && !codeResult.textRequire) {
+      codeResult.textRequire = '・准';
+      logger.debug(`介護+准看護師: textRequire='・准' (精准一致)`);
     }
 
     logger.debug(`Step 7.5: 資格選択 → ${qualType} (${record.staffName})` +
