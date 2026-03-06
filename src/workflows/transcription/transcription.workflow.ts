@@ -630,11 +630,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
       }
       const rows = Array.from(document.querySelectorAll('tr'));
+      let foundButDisabled = false;
       for (const row of rows) {
         const rowText = normCjk(row.textContent || '');
         if (!rowText.includes(args.searchName)) continue;
         const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
-        if (!selectBtn || selectBtn.disabled) continue;
+        if (!selectBtn) continue;
+        // 選択ボタンが disabled → スタッフは存在するが同時間帯に他利用者の予定と重複
+        if (selectBtn.disabled) {
+          foundButDisabled = true;
+          continue;
+        }
         const onclick = selectBtn.getAttribute('onclick') || '';
         const m = onclick.match(/choice\(this,\s*'(\d+)',\s*'([^']+)',\s*(\d+)\)/);
         if (!m) continue;
@@ -642,16 +648,21 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         (window as any).submited = 0;
         if (typeof (window as any).choice === 'function') {
           (window as any).choice(selectBtn, m[1], m[2], 1);
-          return { found: true, helperId: m[1], staffName: m[2] };
+          return { found: true, disabled: false, helperId: m[1], staffName: m[2] };
         }
         /* eslint-enable @typescript-eslint/no-explicit-any */
         selectBtn.click();
-        return { found: true, helperId: m[1], staffName: m[2] };
+        return { found: true, disabled: false, helperId: m[1], staffName: m[2] };
       }
-      return { found: false, helperId: '', staffName: '' };
+      return { found: false, disabled: foundButDisabled, helperId: '', staffName: '' };
     }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
     if (!choiceResult.found) {
+      if (choiceResult.disabled) {
+        throw new Error(
+          `スタッフ配置不可：担当スタッフ「${record.staffName}」が同時間帯に他利用者の予定と重複しHAMで選択不可（手動配置が必要）`
+        );
+      }
       throw new Error(`スタッフ「${record.staffName}」(検索名: ${staffSearchName}) が見つかりません（HAMに登録されていません）`);
     }
     await this.sleep(3000);
@@ -2414,6 +2425,15 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     detail: string;
   } {
     const msg = err.message;
+
+    // スタッフ配置不可（同時間帯重複）— schedule は作成済みだが手動配置が必要
+    if (msg.includes('スタッフ配置不可')) {
+      return {
+        status: 'エラー：システム',
+        category: 'system',
+        detail: 'スタッフ配置不可：担当スタッフが同時間帯に他利用者の予定と重複しHAMで選択不可（手動配置が必要）',
+      };
+    }
 
     // マスタ不備系
     if (msg.includes('患者が見つかりません') || msg.includes('マスタ不備')) {
