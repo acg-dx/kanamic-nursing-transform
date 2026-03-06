@@ -2226,16 +2226,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // --- 実行: searchKbn + checkboxes → 検索 ---
     await this.selectQualificationInFrame(nav, qualType, checkboxes);
 
-    // ★ 介護 (showflag=1/2) 精准一致: searchKbn フィルタが効かないため、
-    //   textRequire='・准' で准看護師サービスのみに候補を限定する。
-    //   serviceitem は等級依存（Ⅰ２=1121, Ⅰ３=1221 等）で固定不可のため、
-    //   textPattern + textRequire によるテキストマッチを一次選択手段とする。
+    // ★ 介護・医療 + 准看護師: textRequire='・准' で精准選択
     //
-    // 例: textPattern='訪看Ⅰ' + textRequire='・准'
-    //   → 訪看Ⅰ２・准, 訪看Ⅰ３・准 等がマッチ → 最短一致で基本サービスを選択
-    if (isKaigo && qualType === 'junkangoshi' && !codeResult.textRequire) {
+    // HAM CSV 実績確認済みの ・准 サフィックス付きサービス:
+    //   介護: 訪看Ⅰ２・准, 訪看Ⅰ３・准 等 (showflag=1/2, searchKbn 非対応)
+    //   医療: 訪問看護基本療養費（Ⅰ・Ⅱ）・准 (showflag=3, searchKbn 対応だが防御的に設定)
+    //
+    // 精神科は ・准 サフィックスが存在しないため対象外
+    // (精神は searchKbn + serviceitem コードレベルで看護師/准看護師を区別)
+    if (!isSeishin && qualType === 'junkangoshi' && !codeResult.textRequire) {
       codeResult.textRequire = '・准';
-      logger.debug(`介護+准看護師: textRequire='・准' (精准一致)`);
+      logger.debug(`${record.serviceType1}+准看護師: textRequire='・准' (精准一致)`);
     }
 
     logger.debug(`Step 7.5: 資格選択 → ${qualType} (${record.staffName})` +
