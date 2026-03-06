@@ -115,7 +115,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     } catch (err) {
       logger.error(`スタッフ事前チェックエラー（転記は続行）: ${(err as Error).message}`);
       // エラー後にメインメニューに復帰
-      try { await this.auth.navigateToMainMenu(); } catch { /* ignore */ }
+      try { await this.auth.navigateToMainMenu(); } catch (navErr) { logger.debug(`メインメニュー復帰失敗: ${(navErr as Error).message}`); }
     }
 
     // 補登失敗のスタッフのレコードを事前にエラーマーク
@@ -686,7 +686,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
               break;
             }
           }
-        } catch { /* ignore */ }
+        } catch (e) { logger.debug(`確認画面フレーム検索エラー: ${(e as Error).message}`); }
       }
       if (confirmClicked) break;
       await this.sleep(1000);
@@ -712,7 +712,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           backClicked = true;
           break;
         }
-      } catch { /* ignore */ }
+      } catch (e) { logger.debug(`戻るリンク検索エラー: ${(e as Error).message}`); }
     }
     if (!backClicked) {
       logger.warn('戻るリンク未検出。act_back にフォールバック');
@@ -770,9 +770,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     logger.debug('Step 12: 上書き保存完了');
 
     // === Step 13: 保存結果検証 ===
-    const content = await nav.getFrameContent('k2_2');
-    if (content.includes('エラー') && !content.includes('エラー：')) {
-      throw new Error(`HAM保存エラー: ${content.substring(0, 300)}`);
+    // HAM のエラーはページ内にエラーメッセージとして表示される
+    // 「エラー」を含むが、正常な k2_2 ページの表示文字列を除外する
+    const saveContent = await nav.getFrameContent('k2_2');
+    const hasHamError = saveContent.includes('エラー') &&
+      !saveContent.includes('配置') && // k2_2 正常時は「配置」ボタンがある
+      !saveContent.includes('act_chooseall'); // 正常時は「全1」ボタンがある
+    if (hasHamError) {
+      throw new Error(`HAM保存エラー: ${saveContent.substring(0, 300)}`);
     }
     logger.debug('Step 13: 保存結果検証OK');
 
@@ -1103,6 +1108,16 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(3000);
     logger.debug('I5フロー: 上書き保存実行');
 
+    // I5 保存結果検証（main flow の Step 13 と同等）
+    const i5SaveContent = await nav.getFrameContent('k2_2');
+    const hasI5Error = i5SaveContent.includes('エラー') &&
+      !i5SaveContent.includes('配置') &&
+      !i5SaveContent.includes('act_chooseall');
+    if (hasI5Error) {
+      throw new Error(`I5 HAM保存エラー: ${i5SaveContent.substring(0, 300)}`);
+    }
+    logger.debug('I5フロー: 保存結果検証OK');
+
     // スプレッドシート更新
     await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
     await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
@@ -1168,7 +1183,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           document.querySelectorAll('input[type="button"][name="act_edit"][value="詳細"]').length
         ).catch(() => 0);
         if (count > 0) { resultFrame = frame; break; }
-      } catch { /* フレーム未準備 */ }
+      } catch (e) { logger.debug(`スタッフ一覧フレーム待機中: ${(e as Error).message}`); }
+    }
+
+    if (!resultFrame) {
+      logger.warn('スタッフ一覧の検索結果が15秒以内に表示されませんでした。空セットを返します');
     }
 
     const names = new Set<string>();
@@ -1451,12 +1470,19 @@ export class TranscriptionWorkflow extends BaseWorkflow {
                 break;
               }
             }
-          } catch { /* ignore */ }
+          } catch (e) { logger.debug(`I5 確認画面フレーム検索エラー: ${(e as Error).message}`); }
         }
         if (confirmClicked) break;
         await this.sleep(1000);
       }
       await this.sleep(3000);
+
+      if (!confirmClicked) {
+        throw new Error(
+          `I5 スタッフ配置不可：担当スタッフ「${record.staffName}」の確認画面（決定ボタン）が表示されませんでした。` +
+          '同時間帯に他利用者の予定と重複しHAMで選択不可の可能性があります（手動配置が必要）'
+        );
+      }
 
       // 「戻る」リンクで k2_2 に戻る
       let backClicked = false;
@@ -1468,7 +1494,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
             backClicked = true;
             break;
           }
-        } catch { /* ignore */ }
+        } catch (e) { logger.debug(`I5 戻るリンク検索中にフレームエラー: ${(e as Error).message}`); }
       }
       if (!backClicked) {
         await nav.submitForm({ action: 'act_back' });
@@ -1509,7 +1535,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           clicked = true;
           break;
         }
-      } catch { /* ignore */ }
+      } catch (e) { logger.debug(`k2_2 戻るボタン検索エラー: ${(e as Error).message}`); }
     }
 
     if (!clicked) {
@@ -1997,8 +2023,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       });
       await this.sleep(2000);
     } catch (saveErr) {
-      logger.error(`削除の上書き保存エラー: ${(saveErr as Error).message}`);
-      return false;
+      throw new Error(
+        `既存スケジュール削除の上書き保存に失敗しました（重複作成を防ぐため中断）: ${(saveErr as Error).message}`
+      );
     }
 
     // 上書き保存後の再検証
@@ -2020,8 +2047,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }, { targetDay: dayNum, st: startTime });
 
     if (stillExists2) {
-      logger.error(`削除検証失敗: assignid=${deleteInfo.assignid} — 上書き保存後もレコードが残存`);
-      return false;
+      throw new Error(
+        `既存スケジュール削除に失敗しました（上書き保存後もレコードが残存）: assignid=${deleteInfo.assignid}（重複作成を防ぐため中断）`
+      );
     }
 
     logger.info(`既存スケジュール削除完了（上書き保存で永続化）: assignid=${deleteInfo.assignid}`);

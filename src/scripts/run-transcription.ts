@@ -39,7 +39,9 @@ import { SmartHRService } from '../services/smarthr.service';
 import { PatientMasterService } from '../services/patient-master.service';
 import { PatientCsvDownloaderService } from '../services/patient-csv-downloader.service';
 import { TranscriptionWorkflow } from '../workflows/transcription/transcription.workflow';
+import { DeletionWorkflow } from '../workflows/deletion/deletion.workflow';
 import { StaffSyncService } from '../workflows/staff-sync/staff-sync.workflow';
+import { ReconciliationService } from '../services/reconciliation.service';
 import { NotificationService } from '../services/notification.service';
 import type { WorkflowContext } from '../types/workflow.types';
 import type { NotificationConfig, DailyReport } from '../types/notification.types';
@@ -254,6 +256,19 @@ async function main(): Promise<void> {
       }
     }
 
+    // === 前月未登録チェック（pre-flight） ===
+    try {
+      const reconciliation = new ReconciliationService(sheets);
+      const prevResult = await reconciliation.checkPreviousMonthUnregistered(AIRA_SHEET_ID);
+      if (prevResult.hasPending) {
+        logger.warn(`[姶良] 前月に未登録レコード ${prevResult.pendingCount} 件を検出！ 先に前月分を処理してください。`);
+      } else {
+        logger.info('前月未登録チェック: 問題なし');
+      }
+    } catch (error) {
+      logger.warn(`前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
+    }
+
     // ワークフロー作成 + マスタ設定
     const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
     workflow.setPatientMaster(patientMaster);
@@ -303,8 +318,31 @@ async function main(): Promise<void> {
       }
     }
 
-    // メール通知
-    await sendNotification(results);
+    // === 削除ワークフロー ===
+    const allResults: WorkflowResult[] = [...results];
+    try {
+      logger.info('========================================');
+      logger.info('  削除処理開始');
+      logger.info('========================================');
+      const deletionWorkflow = new DeletionWorkflow(browser, selectorEngine, sheets, auth);
+      const deletionContext: WorkflowContext = {
+        workflowName: 'deletion',
+        startedAt: new Date(),
+        dryRun,
+        locations: [{ name: '姶良', sheetId: AIRA_SHEET_ID }],
+      };
+      const deletionResults = await deletionWorkflow.run(deletionContext);
+      allResults.push(...deletionResults);
+
+      const delProcessed = deletionResults.reduce((sum, r) => sum + r.processedRecords, 0);
+      const delErrors = deletionResults.reduce((sum, r) => sum + r.errorRecords, 0);
+      logger.info(`削除結果: 処理=${delProcessed}, エラー=${delErrors}`);
+    } catch (delError) {
+      logger.error(`削除ワークフローエラー（転記は完了済み）: ${(delError as Error).message}`);
+    }
+
+    // メール通知（転記+削除結果をまとめて送信）
+    await sendNotification(allResults);
 
     if (totalErrors > 0) {
       process.exit(1);

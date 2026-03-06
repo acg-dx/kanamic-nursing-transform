@@ -142,10 +142,11 @@ export class SpreadsheetService {
         range,
       });
       const rows = response.data.values || [];
+      // IMPORTANT: map BEFORE filter to preserve correct rowIndex (sheet row numbers)
+      // filter-before-map would produce wrong rowIndex when empty rows exist
       return rows
-        .filter(row => row[COL_A]) // skip empty rows
         .map((row, index) => ({
-          rowIndex: index + 2,
+          rowIndex: index + 2, // 1-indexed, header is row 1
           recordId: row[COL_A] || '',
           timestamp: row[COL_B] || '',
           updatedAt: row[COL_C] || '',
@@ -159,7 +160,8 @@ export class SpreadsheetService {
           serviceType1: row[COL_K] || '',
           serviceType2: row[COL_L] || '',
           completionStatus: row[COL_M] || '',
-        }));
+        }))
+        .filter(record => record.recordId); // skip empty rows (after rowIndex assignment)
     } catch (error) {
       logger.error(`削除レコード取得エラー: ${(error as Error).message}`);
       throw error;

@@ -14,7 +14,7 @@
  * 削除Sheetの列構成:
  *   A: ID, B: タイムスタンプ, C: 更新日時, D: 従業員番号, E: 記録者,
  *   F: あおぞらID, G: 利用者, H: 日付, I: 開始時刻, J: 終了時刻,
- *   K: 支援区分1, L: 支援区分2, M: 完了ステータス, N: 削除ステータス（書き込み先）
+ *   K: 支援区分1, L: 支援区分2, M: 削除ステータス（書き込み先: 削除済み/削除不要/エラー）
  */
 import { BaseWorkflow } from '../base-workflow';
 import { logger } from '../../core/logger';
@@ -202,11 +202,7 @@ export class DeletionWorkflow extends BaseWorkflow {
     await this.sleep(2000);
     logger.debug('Step 5: 上書き保存完了');
 
-    // === Step 6: 削除Sheet N列を「削除済み」に更新 ===
-    await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除済み');
-    logger.info(`削除完了: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
-
-    // === Step 7: 月次シートから対象行を削除 ===
+    // === Step 6: 月次シートから対象行を削除（先に実行 — ステータス書き込み失敗時のorphan防止） ===
     const monthTab = this.visitDateToMonthTab(record.visitDate);
     if (monthTab) {
       const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTab, record.recordId);
@@ -218,6 +214,10 @@ export class DeletionWorkflow extends BaseWorkflow {
     } else {
       logger.warn(`月次シートタブ名を特定できません: visitDate=${record.visitDate}`);
     }
+
+    // === Step 7: 削除Sheet M列を「削除済み」に更新 ===
+    await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除済み');
+    logger.info(`削除完了: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
 
     // メインメニューに戻る（次のレコード用）
     await this.auth.navigateToMainMenu();
