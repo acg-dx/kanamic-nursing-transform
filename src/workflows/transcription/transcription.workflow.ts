@@ -251,8 +251,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // --- 医療+通常: 複数人(副)+Q=true → 転記なし (ROW 23) ---
     if (st1 === '医療' && st2.startsWith('通常') && pCol === '複数人(副)' && qTruthy) return false;
 
-    // --- 精神+通常: 複数人(副)+Q=true → 転記なし (ROW 47) ---
-    if (st1 === '精神医療' && st2.startsWith('通常') && pCol === '複数人(副)' && qTruthy) return false;
+    // --- 精神+通常: 複数人(副)+Q=true → 転記あり (ROW 47) → スキップしない ---
+    // ★ ROW 47 は転記対象: 精神科訪問看護基本療養費（Ⅰ・Ⅲ）/・准/（作業療法士等）
 
     // --- 医療+リハビリ: P≠空欄 → 全部転記なし (ROW 29-38) ---
     if (st1 === '医療' && st2 === 'リハビリ' && pCol !== '') return false;
@@ -2218,8 +2218,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     // pluralnurseflag2=複数名訪問(二): (支援者/複数人(主)/看護+介護/複数人(副))+Q=true
-    //   介護 ROW 8-10 / 医療 ROW 17,21,25 / 精神 ROW 41,45,49,58,60,62
-    if (['支援者', '複数人(主)', '複数人(看護+介護)', '複数人(副)'].includes(pCol) && qTruthy) {
+    //   ★介護 ROW 8-10 / 医療 ROW 17,21,25 のみ★
+    //   ★精神医療は Q=TRUE でも複数名訪問(二)を設定しない（基本サービスを選択）★
+    //   精神の Q=TRUE 行（ROW 41,45,47,49,54,58,60,62）はすべて基本サービスを使用し、
+    //   ・複数名サフィックスなし。医療と異なり checkbox 不要。
+    if (!isSeishin && ['支援者', '複数人(主)', '複数人(看護+介護)', '複数人(副)'].includes(pCol) && qTruthy) {
       checkboxes.pluralnurseflag2 = true;
     }
 

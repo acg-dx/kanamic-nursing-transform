@@ -92,9 +92,11 @@ export class ServiceCodeResolver {
     const pluralnurseflag1 = (isMultiNurseP && !qTruthy) ? '1' : '0';
 
     // pluralnurseflag2=複数名訪問(二): P∈{支援者,複数人(主),複数人(看護+介護)} AND Q=TRUE
-    //   ROW 8-10(介護), ROW 17,21,25(医療), ROW 41,45,49(精神)
+    //   ★介護 ROW 8-10, 医療 ROW 17,21,25 のみ★
+    //   ★精神医療は Q=TRUE でも複数名訪問(二)を設定しない（ROW 41,45,47,49,54,58,60,62 は基本サービス）★
     const isSupporterOrMulti = ['支援者', '複数人(主)', '複数人(看護+介護)'].includes(pCol);
-    const pluralnurseflag2 = (isSupporterOrMulti && qTruthy) ? '1' : '0';
+    const isSeishin = serviceType1 === '精神医療';
+    const pluralnurseflag2 = (isSupporterOrMulti && qTruthy && !isSeishin) ? '1' : '0';
 
     // 緊急時加算フラグ (k2_2 urgentflags):
     //   介護: O列(emergencyFlag) 基準
