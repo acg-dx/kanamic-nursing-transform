@@ -2225,6 +2225,15 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // --- 実行: searchKbn + checkboxes → 検索 ---
     await this.selectQualificationInFrame(nav, qualType, checkboxes);
+
+    // 介護 (showflag=1/2) では searchKbn フィルタが効かないため、
+    // 准看護師の場合 textRequire で直接サービス名を絞り込む
+    // 例: textPattern='訪看Ⅰ３' + textRequire='・准' → '訪看Ⅰ３・准' のみ候補
+    if (isKaigo && qualType === 'junkangoshi' && !codeResult.textRequire) {
+      codeResult.textRequire = '・准';
+      logger.debug(`介護+准看護師: textRequire='・准' を設定 (searchKbn フィルタ回避)`);
+    }
+
     logger.debug(`Step 7.5: 資格選択 → ${qualType} (${record.staffName})` +
       (checkboxes.flag2 ? ' [flag2=緊急]' : '') +
       (checkboxes.pluralnurseflag1 ? ' [複数名訪問]' : '') +
