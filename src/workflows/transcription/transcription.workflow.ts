@@ -233,8 +233,6 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const cs = record.completionStatus;
     if (cs === '' || cs === '1') return false;
 
-    // N列「重複」かつ P列が空欄 → スキップ（同行事務員未設定の重複レコード）
-    if (record.accompanyCheck.includes('重複') && !record.accompanyClerkCheck.trim()) return false;
     // O列「緊急時支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
     if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
 

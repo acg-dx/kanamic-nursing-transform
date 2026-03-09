@@ -186,9 +186,19 @@ export class DeletionWorkflow extends BaseWorkflow {
     const deleted = await this.deleteSchedule(nav, visitDateHam, record.startTime, record.staffName);
 
     if (!deleted) {
-      // HAM に該当スケジュールが存在しない → 削除不要として完了扱い
-      logger.warn(`削除対象スケジュールが見つかりません: ${record.patientName} ${record.visitDate} ${record.startTime} → 削除不要として完了`);
-      await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除不要');
+      // HAM に該当スケジュールが存在しない場合でも、月次シートからは削除する
+      // （旧データを残すと重複フラグが立ち、新データの転記がブロックされるため）
+      logger.warn(`削除対象スケジュールが見つかりません: ${record.patientName} ${record.visitDate} ${record.startTime} → HAM削除不要、月次シート行を削除`);
+      const monthTabNotFound = this.visitDateToMonthTab(record.visitDate);
+      if (monthTabNotFound) {
+        const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTabNotFound, record.recordId);
+        if (rowDeleted) {
+          logger.info(`月次シート行削除完了（HAM未登録）: ${record.recordId} (tab=${monthTabNotFound})`);
+        } else {
+          logger.warn(`月次シートに行が見つかりません: ${record.recordId} (tab=${monthTabNotFound})`);
+        }
+      }
+      await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除済み');
       await this.auth.navigateToMainMenu();
       return;
     }
