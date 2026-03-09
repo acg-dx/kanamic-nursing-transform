@@ -26,7 +26,7 @@ import { normalizeCjkName, CJK_VARIANT_MAP_SERIALIZABLE, extractPlainName } from
 import { ServiceCodeResolver } from '../../services/service-code-resolver';
 import { PatientMasterService } from '../../services/patient-master.service';
 import type { ServiceCodeResult } from '../../services/service-code-resolver';
-import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart, calcDurationMinutes } from '../../services/time-utils';
+import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart, calcDurationMinutes, calcCorrectedEndTime } from '../../services/time-utils';
 import type { Frame } from 'playwright';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError, TranscriptionStatus } from '../../types/workflow.types';
@@ -72,7 +72,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     for (const location of locations) {
       const result = await this.executeWithTiming(() =>
-        this.processLocation(location, context.dryRun, context.tab)
+        this.processLocation(location, context.dryRun, context.tab, context.targetRecordIds)
       );
       results.push(result);
     }
@@ -80,7 +80,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     return results;
   }
 
-  private async processLocation(location: SheetLocation, dryRun: boolean, tab?: string): Promise<WorkflowResult> {
+  private async processLocation(location: SheetLocation, dryRun: boolean, tab?: string, targetRecordIds?: string[]): Promise<WorkflowResult> {
     const tabLabel = tab || '当月';
     logger.info(`転記処理開始: ${location.name} (${tabLabel})`);
     const errors: WorkflowError[] = [];
@@ -88,7 +88,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     const records = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
     await this.sheets.formatTranscriptionColumns(location.sheetId, tab);
-    const targets = records.filter(r => this.isTranscriptionTarget(r));
+    let targets = records.filter(r => this.isTranscriptionTarget(r));
+
+    // targetRecordIds 指定時: 対象レコードのみに絞り込む
+    if (targetRecordIds && targetRecordIds.length > 0) {
+      const idSet = new Set(targetRecordIds);
+      targets = targets.filter(r => idSet.has(r.recordId));
+      logger.info(`レコードIDフィルタ適用: ${targetRecordIds.join(', ')} → ${targets.length}件`);
+    }
 
     logger.info(`${location.name}: 対象レコード ${targets.length}/${records.length}件`);
 
@@ -508,6 +515,18 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
     });
     await this.sleep(1000);
+
+    // === Step 6.5: 終了時間補正（HAM自動値を上書き） ===
+    // HAM は timetype に基づく区間終了時刻を自動設定するが、
+    // 実訪問時間が区間境界と一致しない場合は不正確（例: 12:00-12:35 → HAM自動=12:59）。
+    // 正しい終了時間 = 表格の終了時間 - 1分（HAM仕様: 12:35 → 12:34）。
+    const correctedEnd = calcCorrectedEndTime(record.endTime);
+    const k2_3FrameForEnd = await nav.getMainFrame('k2_3');
+    await k2_3FrameForEnd.locator('select[name="endtime0"]').selectOption(correctedEnd.hour);
+    await this.sleep(300);
+    await k2_3FrameForEnd.locator('select[name="endtime1"]').selectOption(correctedEnd.minute);
+    await this.sleep(300);
+    logger.debug(`Step 6.5: 終了時間補正 ${record.endTime} → ${correctedEnd.hour}:${correctedEnd.minute}`);
 
     // 次へ → k2_3a
     await nav.submitForm({ action: 'act_next', waitForPageId: 'k2_3a', timeout: 30000 });
@@ -991,12 +1010,15 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(1000);
     logger.debug(`I5フロー: サービス回数 ${serviceCount}回 クリック`);
 
-    // --- 6d: 終了時刻を上書き ---
-    // setEndtime() が自動計算した値ではなく、実レコードの終了時刻で上書き
-    await frameAfterReload.locator('select[name="endhour"]').nth(0).selectOption(endParts.hour);
+    // --- 6d: 終了時刻を上書き（表格終了時間 - 1分） ---
+    // setEndtime() が自動計算した値ではなく、補正済み終了時刻で上書き。
+    // HAM仕様: 終了時間 = 表格の終了時間 - 1分（例: 12:35 → 12:34）。
+    const correctedEndI5 = calcCorrectedEndTime(record.endTime);
+    await frameAfterReload.locator('select[name="endhour"]').nth(0).selectOption(correctedEndI5.hour);
     await this.sleep(300);
-    await frameAfterReload.locator('select[name="endminute"]').nth(0).selectOption(endParts.minute);
+    await frameAfterReload.locator('select[name="endminute"]').nth(0).selectOption(correctedEndI5.minute);
     await this.sleep(300);
+    logger.debug(`I5フロー: 終了時間補正 ${record.endTime} → ${correctedEndI5.hour}:${correctedEndI5.minute}`);
 
     // 設定値の検証（DOM 読み返し）
     const i5Verify = await frameAfterReload.evaluate(() => {

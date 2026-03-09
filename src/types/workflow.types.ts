@@ -31,6 +31,8 @@ export interface WorkflowContext {
   buildingMgmtSheetId?: string;
   /** 処理対象の月次シートタブ名（例: "2026年02月"）。省略時は当月 */
   tab?: string;
+  /** 指定時: このレコードIDのみ処理（テスト・単一レコード再転記用） */
+  targetRecordIds?: string[];
 }
 
 export interface WorkflowResult {

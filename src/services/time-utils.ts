@@ -11,6 +11,11 @@
  *
  * ※ timetype='21'（20分ちょうど）は不使用（専務確認済み 2026-02-26）
  *
+ * 終了時間補正:
+ *   HAM は timetype 選択時に区間終了時刻を自動設定するが、
+ *   訪問時間が区間境界と一致しない場合は不正確（例: 12:00-12:35 → HAM自動=12:59）。
+ *   正しい終了時間 = 表格の終了時間 - 1分（HAM仕様: 12:35 → 12:34）。
+ *
  * HAM の starttype/endtype 値:
  *   0 = 指定なし
  *   1 = 日中（6:00-18:00）
@@ -42,7 +47,7 @@ export function calcDurationMinutes(startTime: string, endTime: string): number 
  * 専務確認済み統一ルール (2026-02-26):
  *   全支援区分（介護・医療・精神医療）共通。
  *   30分ジャスト → 30分未満、60分ジャスト → 1時間未満。
- *   終了時間は HAM 自動値のまま手動修正しない。
+ *   終了時間は calcCorrectedEndTime() で補正する（表格終了時間 - 1分）。
  */
 export function calcTimetype(durationMinutes: number): string {
   if (durationMinutes <= 20) return '20';      // 20分未満（0~20分）
@@ -102,6 +107,33 @@ export function toHamDate(dateStr: string): string {
 export function toHamMonthStart(dateStr: string): string {
   const d = toHamDate(dateStr);
   return d.substring(0, 6) + '01';
+}
+
+/**
+ * 終了時刻から1分引いた時刻を返す（HAM終了時間補正用）
+ *
+ * HAM は timetype 選択時に区間終了時刻を自動設定するが、
+ * 訪問時間が区間境界と一致しない場合は不正確。
+ * 正しい HAM 終了時間 = 表格の終了時間 - 1分。
+ *
+ * 例:
+ *   "12:35" → { hour: "12", minute: "34" }
+ *   "13:00" → { hour: "12", minute: "59" }
+ *   "00:00" → { hour: "23", minute: "59" }
+ */
+export function calcCorrectedEndTime(endTime: string): { hour: string; minute: string } {
+  const [h, m] = endTime.split(':').map(Number);
+  let correctedMinute = m - 1;
+  let correctedHour = h;
+  if (correctedMinute < 0) {
+    correctedMinute = 59;
+    correctedHour -= 1;
+    if (correctedHour < 0) correctedHour = 23;
+  }
+  return {
+    hour: String(correctedHour).padStart(2, '0'),
+    minute: String(correctedMinute).padStart(2, '0'),
+  };
 }
 
 /**
