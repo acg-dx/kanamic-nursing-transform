@@ -28,9 +28,13 @@ const COL_DATA_FETCHED_AT = COL_W;    // W(22) = データ取得日時 (旧 V)
 const COL_SERVICE_TICKET = COL_X;     // X(23) = サービス票チェック (旧 W)
 const COL_NOTES = COL_Y;              // Y(24) = 備考 (旧 X)
 const COL_RECORD_LOCKED = COL_Z;      // Z(25) = 実績ロック (旧 Y)
+const COL_AA = 26;
+const COL_HAM_ASSIGN_ID = COL_AA;     // AA(26) = HAM assignId（転記時に保存、削除時に使用）
 
 function colToLetter(col: number): string {
-  return String.fromCharCode(65 + col); // A=0, B=1, ...
+  if (col < 26) return String.fromCharCode(65 + col); // A=0 .. Z=25
+  // AA=26, AB=27, ...
+  return String.fromCharCode(64 + Math.floor(col / 26)) + String.fromCharCode(65 + (col % 26));
 }
 
 function getCurrentMonthTab(): string {
@@ -55,7 +59,7 @@ export class SpreadsheetService {
 
   async getTranscriptionRecords(sheetId: string, tab?: string): Promise<TranscriptionRecord[]> {
     tab = tab || getCurrentMonthTab();
-    const range = `${tab}!A2:Z`; // C1 変更後: Z列(25)まで取得
+    const range = `${tab}!A2:AA`; // AA列(26)=HAM assignId まで取得
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
@@ -90,6 +94,7 @@ export class SpreadsheetService {
         serviceTicketCheck: parseBoolean(row[COL_SERVICE_TICKET]), // X(23)
         notes: row[COL_NOTES] || '',                        // Y(24)
         recordLocked: parseBoolean(row[COL_RECORD_LOCKED]), // Z(25)
+        hamAssignId: row[COL_HAM_ASSIGN_ID] || '',       // AA(26)
       }));
     } catch (error) {
       logger.error(`転記レコード取得エラー (sheetId: ${sheetId}): ${(error as Error).message}`);
@@ -132,6 +137,42 @@ export class SpreadsheetService {
       valueInputOption: 'RAW',
       requestBody: { values: [[timestamp]] },
     });
+  }
+
+  /** HAM assignId を月次Sheet AA列に書き込む（転記時に保存、削除時に使用） */
+  async writeHamAssignId(sheetId: string, rowIndex: number, assignId: string, tab?: string): Promise<void> {
+    tab = tab || getCurrentMonthTab();
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tab}!${colToLetter(COL_HAM_ASSIGN_ID)}${rowIndex}`, // AA(26)
+      valueInputOption: 'RAW',
+      requestBody: { values: [[assignId]] },
+    });
+    logger.debug(`HAM assignId 書き込み: row=${rowIndex}, assignId=${assignId}`);
+  }
+
+  /** 月次Sheet から recordId → hamAssignId のマップを構築（削除ワークフロー用） */
+  async getAssignIdMap(sheetId: string, tab?: string): Promise<Map<string, string>> {
+    tab = tab || getCurrentMonthTab();
+    const range = `${tab}!A2:AA`;
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range,
+      });
+      const map = new Map<string, string>();
+      for (const row of response.data.values || []) {
+        const recordId = row[COL_A] || '';
+        const assignId = row[COL_HAM_ASSIGN_ID] || '';
+        if (recordId && assignId) {
+          map.set(recordId, assignId);
+        }
+      }
+      return map;
+    } catch (error) {
+      logger.warn(`assignIdMap 構築エラー（削除はフォールバック方式で続行）: ${(error as Error).message}`);
+      return new Map();
+    }
   }
 
   async getDeletionRecords(sheetId: string): Promise<DeletionRecord[]> {

@@ -53,6 +53,8 @@ export interface TranscriptionRecord {
   notes: string;
   // Z(25): 実績ロック (旧 Y)
   recordLocked: boolean;
+  // AA(26): HAM assignId（転記時に保存、削除時に使用）
+  hamAssignId?: string;
 }
 
 /** 削除Sheet的记录 */

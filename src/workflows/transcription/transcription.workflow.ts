@@ -801,6 +801,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // === Step 14: スプレッドシート更新 ===
     await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
     await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
+    // HAM assignId を保存（削除時に正確な行特定に使用）
+    if (assignId) {
+      await this.sheets.writeHamAssignId(sheetId, record.rowIndex, assignId, tab);
+    }
     logger.info(`転記完了: ${record.recordId} - ${record.patientName} (${record.visitDate})`);
 
     // k2_2 の「戻る」ボタンで k2_1（利用者検索）に戻る
@@ -1100,8 +1104,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     } // end if (!skipI5Creation)
 
     // === I5 スタッフ配置: 未配置の行すべてに同一スタッフを配置 ===
+    let i5AssignIds: string[] = [];
     if (!skipI5StaffAssignment) {
-      await this.assignStaffToAllUnassigned(nav, record);
+      i5AssignIds = await this.assignStaffToAllUnassigned(nav, record);
     } else {
       logger.info(`I5 スタッフ配置スキップ（実績フラグのみ更新）: ${record.recordId}`);
     }
@@ -1141,6 +1146,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // スプレッドシート更新
     await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
     await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
+    // HAM assignId を保存（I5 は複数行の場合カンマ区切り）
+    if (i5AssignIds.length > 0) {
+      await this.sheets.writeHamAssignId(sheetId, record.rowIndex, i5AssignIds.join(','), tab);
+    }
     logger.info(`転記完了(I5): ${record.recordId} - ${record.patientName} (${record.visitDate})`);
 
     // k2_2 の「戻る」ボタンで k2_1（利用者検索）に戻る
@@ -1353,7 +1362,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   private async assignStaffToAllUnassigned(
     nav: HamNavigator,
     record: TranscriptionRecord,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const hamPage = nav.hamPage;
     // CJK 異体字正規化: NFKC + 旧字体→新字体（眞→真, 﨑→崎 等）
     // extractPlainName: "資格-姓名" 形式の場合、資格プレフィックスを除去して氏名のみ使用
@@ -1378,7 +1387,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     if (unassignedIds.length === 0) {
       logger.debug('I5 スタッフ配置: 未配置行なし（既に配置済み）');
-      return;
+      return [];
     }
 
     logger.info(`I5 スタッフ配置: ${unassignedIds.length}行に「${record.staffName}」を配置`);
@@ -1530,6 +1539,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
       logger.debug(`I5 スタッフ配置 ${idx + 1}/${unassignedIds.length}: 完了`);
     }
+
+    return unassignedIds;
   }
 
   /**

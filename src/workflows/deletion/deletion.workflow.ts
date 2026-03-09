@@ -74,6 +74,12 @@ export class DeletionWorkflow extends BaseWorkflow {
     // HAM にログイン
     const nav = await this.auth.ensureLoggedIn();
 
+    // 月次Sheet から recordId → HAM assignId マップを構築（精密削除用）
+    const assignIdMap = await this.sheets.getAssignIdMap(location.sheetId);
+    if (assignIdMap.size > 0) {
+      logger.info(`HAM assignId マップ: ${assignIdMap.size}件ロード完了`);
+    }
+
     for (const record of targets) {
       if (dryRun) {
         logger.info(`[DRY RUN] 削除スキップ: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
@@ -81,9 +87,12 @@ export class DeletionWorkflow extends BaseWorkflow {
         continue;
       }
 
+      // assignId が存在すれば精密削除、なければフォールバック（日付+時刻マッチ）
+      const storedAssignId = assignIdMap.get(record.recordId) || '';
+
       try {
         await withRetry(
-          () => this.processRecord(record, nav, location.sheetId),
+          () => this.processRecord(record, nav, location.sheetId, storedAssignId),
           `削除[${record.recordId}]`,
           { maxAttempts: 3, baseDelay: 2000, maxDelay: 10000, backoffMultiplier: 2 }
         );
@@ -136,8 +145,10 @@ export class DeletionWorkflow extends BaseWorkflow {
     record: DeletionRecord,
     nav: HamNavigator,
     sheetId: string,
+    storedAssignId?: string,
   ): Promise<void> {
-    logger.info(`削除開始: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
+    const hasAssignId = !!storedAssignId;
+    logger.info(`削除開始: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})${hasAssignId ? ` [assignId=${storedAssignId}]` : ' [フォールバック: 日時マッチ]'}`);
 
     // === Step 1: メインメニュー → 業務ガイド → 利用者検索 ===
     await this.auth.navigateToBusinessGuide();
@@ -183,7 +194,18 @@ export class DeletionWorkflow extends BaseWorkflow {
 
     // === Step 4: k2_2 で対象スケジュール行を特定して削除ボタンクリック ===
     const visitDateHam = toHamDate(record.visitDate);
-    const deleted = await this.deleteSchedule(nav, visitDateHam, record.startTime, record.staffName);
+
+    // assignId がある場合: 精密削除（confirmDelete を直接呼び出し）
+    // assignId がない場合: フォールバック（日付+時刻+スタッフ名でマッチ）
+    const assignIds = storedAssignId ? storedAssignId.split(',') : [];
+    let deleted = false;
+
+    if (assignIds.length > 0) {
+      deleted = await this.deleteByAssignIds(nav, assignIds);
+    }
+    if (!deleted) {
+      deleted = await this.deleteSchedule(nav, visitDateHam, record.startTime, record.staffName);
+    }
 
     if (!deleted) {
       // HAM に該当スケジュールが存在しない場合でも、月次シートからは削除する
@@ -353,6 +375,79 @@ export class DeletionWorkflow extends BaseWorkflow {
 
     logger.debug(`削除ボタンクリック完了: assignid=${deleteInfo.assignid}`);
     return true;
+  }
+
+  /**
+   * assignId リストを使って k2_2 のスケジュールを直接削除する（精密削除）
+   *
+   * 各 assignId に対応する削除ボタン confirmDelete('{assignId}', '{record2flag}') を特定し、
+   * record2flag チェック後にクリックする。
+   * I5 の場合は複数 assignId があるため、すべて削除してから true を返す。
+   *
+   * @param nav - HAM navigator
+   * @param assignIds - HAM assignId のリスト（カンマ区切りから分割済み）
+   * @returns true: 少なくとも1件削除した（上書き保存が必要）, false: 該当なし
+   */
+  private async deleteByAssignIds(nav: HamNavigator, assignIds: string[]): Promise<boolean> {
+    const frame = await nav.getMainFrame('k2_2');
+    let deletedCount = 0;
+
+    for (const assignId of assignIds) {
+      const trimmedId = assignId.trim();
+      if (!trimmedId) continue;
+
+      // 削除ボタンの onclick 属性から record2flag を取得
+      const btnInfo = await frame.evaluate((aid: string) => {
+        const selector = `input[name="act_delete"][onclick*="confirmDelete('${aid}'"]`;
+        const btn = document.querySelector(selector) as HTMLInputElement | null;
+        if (!btn) return { found: false, record2flag: '' };
+        const onclick = btn.getAttribute('onclick') || '';
+        const m = onclick.match(/confirmDelete\(\s*'\d+'\s*,\s*'(\d+)'\s*\)/);
+        return { found: true, record2flag: m ? m[1] : '0' };
+      }, trimmedId);
+
+      if (!btnInfo.found) {
+        logger.warn(`assignId=${trimmedId} の削除ボタンが見つかりません（既に削除済みの可能性）`);
+        continue;
+      }
+
+      if (btnInfo.record2flag === '1') {
+        throw new Error(`記録書IIが存在するため削除不可: assignId=${trimmedId}`);
+      }
+
+      // submited フラグをリセットして削除ボタンクリック
+      const delBtn = await frame.$(`input[name="act_delete"][onclick*="confirmDelete('${trimmedId}'"]`);
+      if (delBtn) {
+        await frame.evaluate(() => {
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          (window as any).submited = 0;
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+        });
+        await delBtn.click();
+        await this.sleep(2000);
+        deletedCount++;
+        logger.debug(`assignId=${trimmedId} 削除ボタンクリック完了 (${deletedCount}/${assignIds.length})`);
+      } else {
+        // evaluate で見つかったが $ で取れない場合: confirmDelete 直接呼び出し
+        await frame.evaluate((aid: string) => {
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          const win = window as any;
+          win.submited = 0;
+          if (typeof win.confirmDelete === 'function') {
+            win.confirmDelete(aid, '0');
+          }
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+        }, trimmedId);
+        await this.sleep(2000);
+        deletedCount++;
+        logger.debug(`assignId=${trimmedId} confirmDelete直接呼出完了 (${deletedCount}/${assignIds.length})`);
+      }
+    }
+
+    if (deletedCount > 0) {
+      logger.info(`assignId精密削除: ${deletedCount}件削除（対象: ${assignIds.join(',')}）`);
+    }
+    return deletedCount > 0;
   }
 
   /**
