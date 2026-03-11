@@ -152,7 +152,12 @@ export class SpreadsheetService {
   }
 
   /** 月次Sheet から recordId → hamAssignId のマップを構築（削除ワークフロー用） */
-  async getAssignIdMap(sheetId: string, tab?: string): Promise<Map<string, string>> {
+  async getAssignIdMap(sheetId: string, tab?: string): Promise<{
+    assignIds: Map<string, string>;
+    /** 月次シートで転記済みまたは修正ありと記録されている recordId 集合。
+     *  月次シート読み取り失敗時は null（安全のためフォールバック動作を維持）。 */
+    registeredIds: Set<string> | null;
+  }> {
     tab = tab || getCurrentMonthTab();
     const range = `${tab}!A2:AA`;
     try {
@@ -160,18 +165,28 @@ export class SpreadsheetService {
         spreadsheetId: sheetId,
         range,
       });
-      const map = new Map<string, string>();
+      const assignIds = new Map<string, string>();
+      const registeredIds = new Set<string>();
       for (const row of response.data.values || []) {
         const recordId = row[COL_A] || '';
+        if (!recordId) continue;
         const assignId = row[COL_HAM_ASSIGN_ID] || '';
-        if (recordId && assignId) {
-          map.set(recordId, assignId);
+        const transcriptionFlag = row[COL_TRANSCRIPTION_FLAG] || '';
+        if (assignId) {
+          assignIds.set(recordId, assignId);
+        }
+        // HAM に登録済みと判定する条件:
+        //   - 転記フラグが「転記済み」（正常完了）
+        //   - 転記フラグが「修正あり」（転記済み後に修正検出）
+        //   - assignId が存在（HAM 登録の確実な証拠）
+        if (transcriptionFlag === '転記済み' || transcriptionFlag === '修正あり' || assignId) {
+          registeredIds.add(recordId);
         }
       }
-      return map;
+      return { assignIds, registeredIds };
     } catch (error) {
       logger.warn(`assignIdMap 構築エラー（削除はフォールバック方式で続行）: ${(error as Error).message}`);
-      return new Map();
+      return { assignIds: new Map(), registeredIds: null };
     }
   }
 

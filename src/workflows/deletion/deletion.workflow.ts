@@ -74,10 +74,13 @@ export class DeletionWorkflow extends BaseWorkflow {
     // HAM にログイン
     const nav = await this.auth.ensureLoggedIn();
 
-    // 月次Sheet から recordId → HAM assignId マップを構築（精密削除用）
-    const assignIdMap = await this.sheets.getAssignIdMap(location.sheetId);
+    // 月次Sheet から recordId → HAM assignId マップ＋転記済みレコードID集合を構築
+    const { assignIds: assignIdMap, registeredIds } = await this.sheets.getAssignIdMap(location.sheetId);
     if (assignIdMap.size > 0) {
       logger.info(`HAM assignId マップ: ${assignIdMap.size}件ロード完了`);
+    }
+    if (registeredIds) {
+      logger.info(`転記済みレコード: ${registeredIds.size}件検出`);
     }
 
     for (const record of targets) {
@@ -89,10 +92,12 @@ export class DeletionWorkflow extends BaseWorkflow {
 
       // assignId が存在すれば精密削除、なければフォールバック（日付+時刻マッチ）
       const storedAssignId = assignIdMap.get(record.recordId) || '';
+      // 月次シートで転記済みか判定（registeredIds が null の場合は読み取り失敗 → 安全のため「登録済み扱い」）
+      const isRegistered = registeredIds === null || registeredIds.has(record.recordId);
 
       try {
         await withRetry(
-          () => this.processRecord(record, nav, location.sheetId, storedAssignId),
+          () => this.processRecord(record, nav, location.sheetId, storedAssignId, isRegistered),
           `削除[${record.recordId}]`,
           { maxAttempts: 3, baseDelay: 2000, maxDelay: 10000, backoffMultiplier: 2 }
         );
@@ -146,8 +151,29 @@ export class DeletionWorkflow extends BaseWorkflow {
     nav: HamNavigator,
     sheetId: string,
     storedAssignId?: string,
+    isRegistered?: boolean,
   ): Promise<void> {
     const hasAssignId = !!storedAssignId;
+
+    // === 未転記レコードのHAM削除スキップ ===
+    // 月次シートで転記済みでなく assignId もない場合、HAM にスケジュールは存在しない。
+    // フォールバック（日付+時刻+スタッフ名マッチ）で別レコードの正しいスケジュールを
+    // 誤削除するリスクを回避するため、HAM 操作をスキップして月次シート行のみ削除する。
+    if (!hasAssignId && isRegistered === false) {
+      logger.info(`HAM未転記レコード: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime}) → HAM削除スキップ、月次シート行のみ削除`);
+      const monthTab = this.visitDateToMonthTab(record.visitDate);
+      if (monthTab) {
+        const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTab, record.recordId);
+        if (rowDeleted) {
+          logger.info(`月次シート行削除完了（HAM未転記）: ${record.recordId} (tab=${monthTab})`);
+        } else {
+          logger.warn(`月次シートに行が見つかりません: ${record.recordId} (tab=${monthTab})`);
+        }
+      }
+      await this.sheets.updateDeletionStatus(sheetId, record.rowIndex, '削除済み');
+      return;
+    }
+
     logger.info(`削除開始: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})${hasAssignId ? ` [assignId=${storedAssignId}]` : ' [フォールバック: 日時マッチ]'}`);
 
     // === Step 1: メインメニュー → 業務ガイド → 利用者検索 ===
