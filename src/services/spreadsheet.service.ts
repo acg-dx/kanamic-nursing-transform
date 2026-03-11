@@ -151,6 +151,19 @@ export class SpreadsheetService {
     logger.debug(`HAM assignId 書き込み: row=${rowIndex}, assignId=${assignId}`);
   }
 
+  /**
+   * 月次Sheet の指定セルを空白にクリアする（汎用）
+   * @param column 列文字 (e.g. 'N')
+   */
+  async clearCellValue(sheetId: string, tab: string, column: string, rowIndex: number): Promise<void> {
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tab}!${column}${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [['']] },
+    });
+  }
+
   /** 月次Sheet から recordId → hamAssignId のマップを構築（削除ワークフロー用） */
   async getAssignIdMap(sheetId: string, tab?: string): Promise<{
     assignIds: Map<string, string>;

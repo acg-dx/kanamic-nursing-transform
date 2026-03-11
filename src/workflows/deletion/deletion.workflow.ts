@@ -23,7 +23,7 @@ import { CJK_VARIANT_MAP_SERIALIZABLE, extractPlainName } from '../../core/cjk-n
 import { toHamDate, toHamMonthStart } from '../../services/time-utils';
 import type { HamNavigator } from '../../core/ham-navigator';
 import type { WorkflowContext, WorkflowResult, WorkflowError } from '../../types/workflow.types';
-import type { DeletionRecord } from '../../types/spreadsheet.types';
+import type { DeletionRecord, TranscriptionRecord } from '../../types/spreadsheet.types';
 import type { SheetLocation } from '../../types/config.types';
 
 const WORKFLOW_NAME = 'deletion';
@@ -83,6 +83,10 @@ export class DeletionWorkflow extends BaseWorkflow {
       logger.info(`転記済みレコード: ${registeredIds.size}件検出`);
     }
 
+    // 月次Sheet の重複ペアマップ構築（削除時に配対レコードの重複マークをクリアするため）
+    // キーは看護記録転記プロジェクト (data-writer.ts) と同一: 利用者名+日付+開始+終了
+    const duplicatePairMap = await this.buildDuplicatePairMap(location.sheetId, targets);
+
     for (const record of targets) {
       if (dryRun) {
         logger.info(`[DRY RUN] 削除スキップ: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})`);
@@ -97,7 +101,7 @@ export class DeletionWorkflow extends BaseWorkflow {
 
       try {
         await withRetry(
-          () => this.processRecord(record, nav, location.sheetId, storedAssignId, isRegistered),
+          () => this.processRecord(record, nav, location.sheetId, storedAssignId, isRegistered, duplicatePairMap),
           `削除[${record.recordId}]`,
           { maxAttempts: 3, baseDelay: 2000, maxDelay: 10000, backoffMultiplier: 2 }
         );
@@ -152,6 +156,7 @@ export class DeletionWorkflow extends BaseWorkflow {
     sheetId: string,
     storedAssignId?: string,
     isRegistered?: boolean,
+    duplicatePairMap?: Map<string, Array<{ rowIndex: number; recordId: string; tab: string }>>,
   ): Promise<void> {
     const hasAssignId = !!storedAssignId;
 
@@ -163,6 +168,7 @@ export class DeletionWorkflow extends BaseWorkflow {
       logger.info(`HAM未転記レコード: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime}) → HAM削除スキップ、月次シート行のみ削除`);
       const monthTab = this.visitDateToMonthTab(record.visitDate);
       if (monthTab) {
+        await this.clearDuplicateFlagOnPairs(sheetId, monthTab, record.recordId, duplicatePairMap);
         const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTab, record.recordId);
         if (rowDeleted) {
           logger.info(`月次シート行削除完了（HAM未転記）: ${record.recordId} (tab=${monthTab})`);
@@ -239,6 +245,7 @@ export class DeletionWorkflow extends BaseWorkflow {
       logger.warn(`削除対象スケジュールが見つかりません: ${record.patientName} ${record.visitDate} ${record.startTime} → HAM削除不要、月次シート行を削除`);
       const monthTabNotFound = this.visitDateToMonthTab(record.visitDate);
       if (monthTabNotFound) {
+        await this.clearDuplicateFlagOnPairs(sheetId, monthTabNotFound, record.recordId, duplicatePairMap);
         const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTabNotFound, record.recordId);
         if (rowDeleted) {
           logger.info(`月次シート行削除完了（HAM未登録）: ${record.recordId} (tab=${monthTabNotFound})`);
@@ -260,9 +267,10 @@ export class DeletionWorkflow extends BaseWorkflow {
     await this.sleep(2000);
     logger.debug('Step 5: 上書き保存完了');
 
-    // === Step 6: 月次シートから対象行を削除（先に実行 — ステータス書き込み失敗時のorphan防止） ===
+    // === Step 6: 配対レコードの重複マーク解除 + 月次シートから対象行を削除 ===
     const monthTab = this.visitDateToMonthTab(record.visitDate);
     if (monthTab) {
+      await this.clearDuplicateFlagOnPairs(sheetId, monthTab, record.recordId, duplicatePairMap);
       const rowDeleted = await this.sheets.deleteRowByRecordId(sheetId, monthTab, record.recordId);
       if (rowDeleted) {
         logger.info(`月次シート行削除完了: ${record.recordId} (tab=${monthTab})`);
@@ -279,6 +287,90 @@ export class DeletionWorkflow extends BaseWorkflow {
 
     // メインメニューに戻る（次のレコード用）
     await this.auth.navigateToMainMenu();
+  }
+
+  /**
+   * 月次Sheet の重複ペアマップを構築する
+   *
+   * 削除対象レコードが属する月のみ読み込み、キー（患者名+日付+開始+終了）で
+   * グループ化して N列=重複 のペアを特定する。
+   * キーは看護記録転記プロジェクト (data-writer.ts buildDuplicateKeys) と同一基準。
+   *
+   * @returns recordId → 同グループの全メンバー（rowIndex, recordId, tab）
+   */
+  private async buildDuplicatePairMap(
+    sheetId: string,
+    targets: DeletionRecord[],
+  ): Promise<Map<string, Array<{ rowIndex: number; recordId: string; tab: string }>>> {
+    const pairMap = new Map<string, Array<{ rowIndex: number; recordId: string; tab: string }>>();
+
+    // 削除対象レコードの月タブを収集（重複排除）
+    const monthTabs = new Set<string>();
+    for (const r of targets) {
+      const tab = this.visitDateToMonthTab(r.visitDate);
+      if (tab) monthTabs.add(tab);
+    }
+
+    for (const tab of monthTabs) {
+      let records: TranscriptionRecord[];
+      try {
+        records = await this.sheets.getTranscriptionRecords(sheetId, tab);
+      } catch (e) {
+        logger.warn(`重複ペアマップ構築: タブ「${tab}」の読み取り失敗: ${(e as Error).message}`);
+        continue;
+      }
+
+      // キーでグループ化（N列=重複 のレコードのみ）
+      const groups = new Map<string, TranscriptionRecord[]>();
+      for (const r of records) {
+        if (!r.accompanyCheck.includes('重複')) continue;
+        const key = `${r.patientName.normalize('NFKC').replace(/[\s\u3000\u00a0]+/g, '')}|${r.visitDate}|${r.startTime}|${r.endTime}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
+      }
+
+      // 2件以上のグループのみペアマップに登録
+      for (const [, group] of groups) {
+        if (group.length < 2) continue;
+        const peers = group.map(r => ({ rowIndex: r.rowIndex, recordId: r.recordId, tab }));
+        for (const r of group) {
+          pairMap.set(r.recordId, peers);
+        }
+      }
+    }
+
+    if (pairMap.size > 0) {
+      logger.info(`重複ペアマップ: ${pairMap.size}件のレコードにペア情報あり`);
+    }
+    return pairMap;
+  }
+
+  /**
+   * 削除対象レコードの配対レコードから重複マーク（N列）をクリアする
+   *
+   * 行が物理削除される前に呼び出すこと。配対レコードの N列を空白に更新し、
+   * 重複ブロックを即座に解除する（看護記録転記の cleanupStaleDuplicateMarkers と幂等）。
+   */
+  private async clearDuplicateFlagOnPairs(
+    sheetId: string,
+    tab: string,
+    deletedRecordId: string,
+    pairMap?: Map<string, Array<{ rowIndex: number; recordId: string; tab: string }>>,
+  ): Promise<void> {
+    if (!pairMap) return;
+    const peers = pairMap.get(deletedRecordId);
+    if (!peers) return;
+
+    for (const peer of peers) {
+      if (peer.recordId === deletedRecordId) continue; // 自分自身はスキップ
+      if (peer.tab !== tab) continue; // 安全: 同じタブのみ
+      try {
+        await this.sheets.clearCellValue(sheetId, tab, 'N', peer.rowIndex);
+        logger.info(`重複マーク解除: recordId=${peer.recordId} (row=${peer.rowIndex}, tab=${tab})`);
+      } catch (e) {
+        logger.warn(`重複マーク解除失敗: recordId=${peer.recordId} — ${(e as Error).message}`);
+      }
+    }
   }
 
   /**

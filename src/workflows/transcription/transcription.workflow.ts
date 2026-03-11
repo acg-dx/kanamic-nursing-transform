@@ -88,7 +88,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     const records = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
     await this.sheets.formatTranscriptionColumns(location.sheetId, tab);
-    let targets = records.filter(r => this.isTranscriptionTarget(r));
+
+    // 重複ペア跨レコードバリデーション: 同一キーのグループでいずれかのP列が空 → 全員ブロック
+    const duplicateBlocked = this.buildDuplicateBlockedSet(records);
+    if (duplicateBlocked.size > 0) {
+      logger.info(`重複ペア未判定でブロック: ${duplicateBlocked.size}件 (P列未入力のペアあり)`);
+    }
+
+    let targets = records.filter(r => {
+      if (duplicateBlocked.has(r.recordId)) return false;
+      return this.isTranscriptionTarget(r);
+    });
 
     // targetRecordIds 指定時: 対象レコードのみに絞り込む
     if (targetRecordIds && targetRecordIds.length > 0) {
@@ -231,6 +241,37 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
+   * 重複ペアの跨レコードバリデーション
+   *
+   * 同一キー（患者名+日付+開始時刻+終了時刻）のグループで N列=重複 のレコードがあり、
+   * いずれかの P列が空欄の場合、グループ全体をブロックする。
+   * キーは看護記録転記プロジェクト (data-writer.ts buildDuplicateKeys) と同一基準。
+   *
+   * @returns ブロック対象の recordId セット
+   */
+  private buildDuplicateBlockedSet(records: TranscriptionRecord[]): Set<string> {
+    // Step 1: 重複レコードをキーでグループ化
+    const groups = new Map<string, TranscriptionRecord[]>();
+    for (const r of records) {
+      if (!r.accompanyCheck.includes('重複')) continue;
+      const key = `${r.patientName.normalize('NFKC').replace(/[\s\u3000\u00a0]+/g, '')}|${r.visitDate}|${r.startTime}|${r.endTime}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(r);
+    }
+
+    // Step 2: いずれかの P列が空 → グループ全体をブロック
+    const blocked = new Set<string>();
+    for (const [, group] of groups) {
+      if (group.some(r => !r.accompanyClerkCheck.trim())) {
+        for (const r of group) {
+          blocked.add(r.recordId);
+        }
+      }
+    }
+    return blocked;
+  }
+
+  /**
    * 転記対象レコードかどうかを判定
    */
   isTranscriptionTarget(record: TranscriptionRecord): boolean {
@@ -239,6 +280,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 会議決定: "2","3","4" のみ転記対象
     const cs = record.completionStatus;
     if (cs === '' || cs === '1') return false;
+
+    // N列「重複」かつ P列が空欄 → スキップ（事務員未判定 — ペアの役割が未確定）
+    if (record.accompanyCheck.includes('重複') && !record.accompanyClerkCheck.trim()) return false;
 
     // O列「緊急支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
     if (record.emergencyFlag.includes('緊急支援あり') && !record.emergencyClerkCheck.trim()) return false;
