@@ -635,7 +635,7 @@ export class ReconciliationService {
     const cs = record.completionStatus;
     if (cs === '' || cs === '1') return false;
     if (record.accompanyCheck.includes('重複') && !record.accompanyClerkCheck.trim()) return false;
-    if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
+    if (record.emergencyFlag.includes('緊急支援あり') && !record.emergencyClerkCheck.trim()) return false;
     if (record.transcriptionFlag === '転記済み') return false;
     if (record.transcriptionFlag === '') return true;
     if (record.transcriptionFlag === 'エラー：システム') return true;

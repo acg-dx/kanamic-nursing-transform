@@ -240,8 +240,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const cs = record.completionStatus;
     if (cs === '' || cs === '1') return false;
 
-    // O列「緊急時支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
-    if (record.emergencyFlag.includes('緊急時支援あり') && !record.emergencyClerkCheck.trim()) return false;
+    // O列「緊急支援あり」かつ R列が空欄 → スキップ（緊急時事務員未設定）
+    if (record.emergencyFlag.includes('緊急支援あり') && !record.emergencyClerkCheck.trim()) return false;
 
     // ---- 転記処理詳細.xlsx 全組み合わせ表に基づく転記対象外判定 ----
     const pCol = record.accompanyClerkCheck.trim();     // P列: 同行事務員チェック

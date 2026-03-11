@@ -60,7 +60,7 @@ describe('isTranscriptionTarget', () => {
     expect(workflow.isTranscriptionTarget(makeRecord({ completionStatus: '4', transcriptionFlag: '' }))).toBe(true);
   });
 
-  // ===== 重複・緊急時支援スキップ =====
+  // ===== 重複・緊急支援スキップ =====
 
   it('N列「重複」かつ P列が空欄のレコードは転記対象外', () => {
     expect(workflow.isTranscriptionTarget(makeRecord({
@@ -79,17 +79,17 @@ describe('isTranscriptionTarget', () => {
     }))).toBe(true);
   });
 
-  it('O列「緊急時支援あり」かつ R列が空欄のレコードは転記対象外', () => {
+  it('O列「緊急支援あり」かつ R列が空欄のレコードは転記対象外', () => {
     expect(workflow.isTranscriptionTarget(makeRecord({
-      emergencyFlag: '緊急時支援あり',
+      emergencyFlag: '緊急支援あり',
       emergencyClerkCheck: '',
       completionStatus: '2',
     }))).toBe(false);
   });
 
-  it('O列「緊急時支援あり」でも R列に値があれば転記対象', () => {
+  it('O列「緊急支援あり」でも R列に値があれば転記対象', () => {
     expect(workflow.isTranscriptionTarget(makeRecord({
-      emergencyFlag: '緊急時支援あり',
+      emergencyFlag: '緊急支援あり',
       emergencyClerkCheck: '佐藤花子',
       completionStatus: '2',
       transcriptionFlag: '',
