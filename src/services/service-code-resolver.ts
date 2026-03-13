@@ -99,11 +99,9 @@ export class ServiceCodeResolver {
     const pluralnurseflag2 = (isSupporterOrMulti && qTruthy && !isSeishin) ? '1' : '0';
 
     // 緊急時加算フラグ (k2_2 urgentflags):
-    //   介護: O列(emergencyFlag) 基準
-    //   医療/精神医療: O列=true AND R列='加算対象' のときのみ ON
-    const setUrgentFlag = serviceType1 === '介護'
-      ? hasEmergency
-      : (hasEmergency && isKasanTaisho);
+    //   全保険種別共通: O列=true AND R列='加算対象' のときのみ ON
+    //   R列=加算対象外 or 空欄 → urgentflags OFF
+    const setUrgentFlag = hasEmergency && isKasanTaisho;
 
     const flags = { longcareflag, pluralnurseflag1, pluralnurseflag2, setUrgentFlag };
 
