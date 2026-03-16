@@ -505,7 +505,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // === Step 4.5b: 修正レコードの場合 → 既存スケジュール先行削除 ===
     if (record.transcriptionFlag === '修正あり') {
       logger.info(`修正レコード検出: ${record.recordId} — 既存スケジュールを削除します`);
-      const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime, record.staffName);
+      const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime, record.staffName, record.hamAssignId);
       if (deleted) {
         logger.info(`既存スケジュール削除完了 → 再転記を続行`);
       } else {
@@ -940,6 +940,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     if (!skipI5Creation) {
+    // === I5 修正レコードの場合 → 既存スケジュール先行削除 ===
+    if (record.transcriptionFlag === '修正あり') {
+      logger.info(`I5 修正レコード検出: ${record.recordId} — 既存スケジュールを削除します`);
+      const deleted = await this.deleteExistingSchedule(nav, visitDateHam, record.startTime, record.staffName, record.hamAssignId);
+      if (deleted) {
+        logger.info(`I5 既存スケジュール削除完了 → 再作成を続行`);
+      } else {
+        logger.warn(`I5 既存スケジュールが見つからないか削除不可 → 新規追加として続行`);
+      }
+    }
+
     // Step 5: k2_2 で 訪看I5入力ボタン → k2_7_1
     await nav.submitForm({
       action: 'act_i5',
@@ -1062,15 +1073,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     await this.sleep(1000);
     logger.debug(`I5フロー: サービス回数 ${serviceCount}回 クリック`);
 
-    // --- 6d: 終了時刻を上書き（表格終了時間 - 1分） ---
-    // setEndtime() が自動計算した値ではなく、補正済み終了時刻で上書き。
-    // HAM仕様: 終了時間 = 表格の終了時間 - 1分（例: 12:35 → 12:34）。
-    const correctedEndI5 = calcCorrectedEndTime(record.endTime);
-    await frameAfterReload.locator('select[name="endhour"]').nth(0).selectOption(correctedEndI5.hour);
-    await this.sleep(300);
-    await frameAfterReload.locator('select[name="endminute"]').nth(0).selectOption(correctedEndI5.minute);
-    await this.sleep(300);
-    logger.debug(`I5フロー: 終了時間補正 ${record.endTime} → ${correctedEndI5.hour}:${correctedEndI5.minute}`);
+    // --- 6d: 終了時刻 ---
+    // I5 は setEndtime() が 20分単位で正確に自動計算するため、-1分補正は不要。
+    // 通常フロー (k2_3) とは異なり、HAM 自動値をそのまま使用する。
+    logger.debug(`I5フロー: 終了時刻は setEndtime() 自動計算値を使用（補正なし）`);
 
     // 設定値の検証（DOM 読み返し）
     const i5Verify = await frameAfterReload.evaluate(() => {
@@ -1933,13 +1939,35 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    *
    * staffName を指定すると、同一日付+時刻に複数エントリがある場合に
    * スタッフ名でマッチする行を優先的に削除する（重複キー対策）。
+   *
+   * hamAssignId を指定すると、日付・時刻に依存せず assignId で直接行を特定する。
+   * 修正レコード（日付・時刻変更あり）では、Sheet 上の値が既に新しい値に上書きされているため、
+   * 旧スケジュールを日付+時刻で検索できない。assignId は不変のため確実に特定可能。
+   * I5 レコードの場合はカンマ区切りで複数 assignId が格納されている。
    */
   private async deleteExistingSchedule(
     nav: HamNavigator,
     visitDateHam: string,
     startTime: string,
     staffName?: string,
+    hamAssignId?: string,
   ): Promise<boolean> {
+    // === assignId 直接検索モード（修正レコード用） ===
+    if (hamAssignId) {
+      // I5 はカンマ区切りで複数 assignId を持つ場合がある
+      const assignIds = hamAssignId.split(',').map(s => s.trim()).filter(Boolean);
+      logger.info(`修正レコード: assignId で既存スケジュールを削除 (${assignIds.length}件: ${assignIds.join(', ')})`);
+
+      for (const aid of assignIds) {
+        const deleted = await this.deleteScheduleByAssignId(nav, aid);
+        if (!deleted) {
+          logger.warn(`assignId=${aid} の削除に失敗（既に削除済み or 見つからない）`);
+        }
+      }
+      return true;
+    }
+
+    // === 従来の日付+時刻検索モード ===
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
     const dayDisplay = `${dayNum}日`;
@@ -2132,6 +2160,133 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     logger.info(`既存スケジュール削除完了（上書き保存で永続化）: assignid=${deleteInfo.assignid}`);
+    return true;
+  }
+
+  /**
+   * assignId を指定して k2_2 上の単一スケジュール行を削除する。
+   * 日付・時刻に依存しないため、修正レコード（日付・時刻変更あり）に対応。
+   */
+  private async deleteScheduleByAssignId(nav: HamNavigator, targetAssignId: string): Promise<boolean> {
+    const frame = await nav.getMainFrame('k2_2');
+
+    // assignId を含む削除ボタンを検索
+    const deleteInfo = await frame.evaluate((aid) => {
+      const rows = Array.from(document.querySelectorAll('tr'));
+      for (const row of rows) {
+        const delBtns = row.querySelectorAll('input[name="act_delete"][value="削除"]');
+        for (const btn of Array.from(delBtns)) {
+          const onclick = btn.getAttribute('onclick') || '';
+          const m = onclick.match(/confirmDelete\(\s*'(\d+)'\s*,\s*'(\d+)'\s*\)/);
+          if (m && m[1] === aid) {
+            return {
+              found: true,
+              assignid: m[1],
+              record2flag: m[2],
+              rowText: (row.textContent || '').replace(/\s+/g, ' ').trim().substring(0, 120),
+            };
+          }
+        }
+      }
+      return { found: false, assignid: '', record2flag: '', rowText: '' };
+    }, targetAssignId);
+
+    if (!deleteInfo.found) {
+      logger.debug(`assignId=${targetAssignId} の行が見つかりません（既に削除済みの可能性）`);
+      return false;
+    }
+
+    logger.info(`assignId 指定削除: ${deleteInfo.rowText} (assignid=${deleteInfo.assignid})`);
+
+    if (deleteInfo.record2flag === '1') {
+      throw new Error(`record2flag=1: 記録書IIにより削除不可 (assignid=${deleteInfo.assignid})`);
+    }
+
+    // confirmDelete を実行
+    const delBtn = await frame.$(`input[name="act_delete"][onclick*="confirmDelete('${targetAssignId}'"]`);
+    if (delBtn) {
+      await frame.evaluate(() => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        (window as any).submited = 0;
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      });
+      await delBtn.click();
+      await this.sleep(2000);
+    } else {
+      await frame.evaluate((aid) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const win = window as any;
+        win.submited = 0;
+        if (typeof win.confirmDelete === 'function') {
+          win.confirmDelete(aid, '0');
+        }
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      }, targetAssignId);
+      await this.sleep(2000);
+    }
+
+    // ページリロード待ち
+    await nav.waitForMainFrame('k2_2', 15000);
+    await this.sleep(2000);
+
+    // form.doAction の復元を待つ
+    for (let waitIdx = 0; waitIdx < 10; waitIdx++) {
+      const f = await nav.getMainFrame('k2_2');
+      const ready = await f.evaluate(() => {
+        const form = document.forms[0];
+        return !!(form && (form as HTMLFormElement & { doAction?: unknown }).doAction);
+      }).catch(() => false);
+      if (ready) break;
+      await this.sleep(1000);
+    }
+
+    // 削除検証: assignId の行がまだ存在するか
+    const verifyFrame = await nav.getMainFrame('k2_2');
+    const stillExists = await verifyFrame.evaluate((aid) => {
+      const btns = document.querySelectorAll('input[name="act_delete"][value="削除"]');
+      for (const btn of Array.from(btns)) {
+        const onclick = btn.getAttribute('onclick') || '';
+        if (onclick.includes(`confirmDelete('${aid}'`)) return true;
+      }
+      return false;
+    }, targetAssignId);
+
+    if (!stillExists) {
+      logger.info(`assignId 指定削除完了: assignid=${targetAssignId}`);
+      return true;
+    }
+
+    // 上書き保存で永続化
+    logger.info('confirmDelete 後もレコード残存 → 上書き保存で永続化を試行');
+    try {
+      await nav.submitForm({
+        action: 'act_update',
+        setLockCheck: true,
+        waitForPageId: 'k2_2',
+      });
+      await this.sleep(2000);
+    } catch (saveErr) {
+      throw new Error(
+        `assignId 指定削除の上書き保存に失敗: assignid=${targetAssignId}, ${(saveErr as Error).message}`
+      );
+    }
+
+    // 上書き保存後の再検証
+    const verifyFrame2 = await nav.getMainFrame('k2_2');
+    const stillExists2 = await verifyFrame2.evaluate((aid) => {
+      const btns = document.querySelectorAll('input[name="act_delete"][value="削除"]');
+      for (const btn of Array.from(btns)) {
+        const onclick = btn.getAttribute('onclick') || '';
+        if (onclick.includes(`confirmDelete('${aid}'`)) return true;
+      }
+      return false;
+    }, targetAssignId);
+
+    if (stillExists2) {
+      throw new Error(`assignId 指定削除に失敗: assignid=${targetAssignId}（上書き保存後もレコードが残存）`);
+    }
+
+    logger.info(`assignId 指定削除完了（上書き保存で永続化）: assignid=${targetAssignId}`);
     return true;
   }
 
