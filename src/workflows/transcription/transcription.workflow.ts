@@ -217,10 +217,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         });
         logger.error(`転記エラー [${record.recordId}]: ${err.message}`);
 
-        consecutiveErrors++;
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          logger.error(`連続${MAX_CONSECUTIVE_ERRORS}件エラー — システム障害と判断し処理を中止します`);
-          break;
+        // マスタ不備（患者/スタッフ未登録等）はデータ問題であり、システム障害ではない。
+        // 連続エラーカウントに含めると、同一患者の複数レコードで熔断してしまう。
+        if (category !== 'master') {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            logger.error(`連続${MAX_CONSECUTIVE_ERRORS}件システムエラー — システム障害と判断し処理を中止します`);
+            break;
+          }
         }
 
         // エラー後にメインメニューへ復帰を試みる
