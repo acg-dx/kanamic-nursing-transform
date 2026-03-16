@@ -116,13 +116,26 @@ export function toHamMonthStart(dateStr: string): string {
  * 訪問時間が区間境界と一致しない場合は不正確。
  * 正しい HAM 終了時間 = 表格の終了時間 - 1分。
  *
+ * ただし、分の1の位が既に 9 の場合（:29, :59 等）は HAM の inclusive 形式と
+ * みなし、補正せずそのまま返す。
+ *
  * 例:
- *   "12:35" → { hour: "12", minute: "34" }
- *   "13:00" → { hour: "12", minute: "59" }
- *   "00:00" → { hour: "23", minute: "59" }
+ *   "12:35" → { hour: "12", minute: "34" }  (補正)
+ *   "13:00" → { hour: "12", minute: "59" }  (補正)
+ *   "11:29" → { hour: "11", minute: "29" }  (そのまま)
+ *   "11:59" → { hour: "11", minute: "59" }  (そのまま)
  */
 export function calcCorrectedEndTime(endTime: string): { hour: string; minute: string } {
   const [h, m] = endTime.split(':').map(Number);
+
+  // 分の1の位が 9 → 既に HAM 形式（inclusive 終了時刻）なので補正不要
+  if (m % 10 === 9) {
+    return {
+      hour: String(h).padStart(2, '0'),
+      minute: String(m).padStart(2, '0'),
+    };
+  }
+
   let correctedMinute = m - 1;
   let correctedHour = h;
   if (correctedMinute < 0) {
