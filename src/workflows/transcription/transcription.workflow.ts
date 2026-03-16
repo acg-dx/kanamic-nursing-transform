@@ -247,8 +247,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   /**
    * 重複ペアの跨レコードバリデーション
    *
-   * 同一キー（患者名+日付+開始時刻+終了時刻）のグループで N列=重複 のレコードがあり、
-   * いずれかの P列が空欄の場合、グループ全体をブロックする。
+   * 同一キー（患者名+日付+開始時刻+終了時刻）のグループで N列=重複 のレコードがあり:
+   *   1. いずれかの P列が空欄 → グループ全体をブロック（事務員未判定）
+   *   2. 全 P列が入力済み → 資格優先度が最も高いスタッフの1件のみ転記対象、残りをブロック
+   *      優先度: 看護師 > 准看護師 > その他
+   *
    * キーは看護記録転記プロジェクト (data-writer.ts buildDuplicateKeys) と同一基準。
    *
    * @returns ブロック対象の recordId セット
@@ -263,14 +266,40 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       groups.get(key)!.push(r);
     }
 
-    // Step 2: いずれかの P列が空 → グループ全体をブロック
     const blocked = new Set<string>();
-    for (const [, group] of groups) {
+    for (const [key, group] of groups) {
+      // Step 2a: いずれかの P列が空 → グループ全体をブロック
       if (group.some(r => !r.accompanyClerkCheck.trim())) {
         for (const r of group) {
           blocked.add(r.recordId);
         }
+        continue;
       }
+
+      // Step 2b: 全 P列入力済み → 資格が最も高い1件のみ転記、残りをブロック
+      if (group.length <= 1) continue;
+
+      // スタッフ名プレフィックスから資格スコアを算出（看護師=2, 准看護師=1, その他=0）
+      const scored = group.map(r => {
+        const name = r.staffName || '';
+        let score = 0;
+        if (name.startsWith('看護師')) score = 2;
+        else if (name.startsWith('准看護師')) score = 1;
+        return { record: r, score };
+      });
+      // スコア降順ソート（同点は元の順序を維持）
+      scored.sort((a, b) => b.score - a.score);
+
+      // 最高スコアの1件以外をブロック
+      const winner = scored[0].record;
+      for (const { record } of scored) {
+        if (record.recordId !== winner.recordId) {
+          blocked.add(record.recordId);
+        }
+      }
+      logger.debug(
+        `重複グループ ${key}: ${group.length}件中「${winner.staffName}」(${winner.recordId}) を転記対象に選択`
+      );
     }
     return blocked;
   }
