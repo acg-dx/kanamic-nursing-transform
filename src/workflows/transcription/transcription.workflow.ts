@@ -2725,10 +2725,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const msg = err.message;
 
     // スタッフ配置不可（同時間帯重複）— schedule は作成済みだが手動配置が必要
+    // 自動再試行では解決できない（HAM 上の時間重複を手動調整する必要がある）ため master 扱い
     if (msg.includes('スタッフ配置不可')) {
       return {
-        status: 'エラー：システム',
-        category: 'system',
+        status: 'エラー：マスタ不備',
+        category: 'master',
         detail: 'スタッフ配置不可：担当スタッフが同時間帯に他利用者の予定と重複しHAMで選択不可（手動配置が必要）',
       };
     }
