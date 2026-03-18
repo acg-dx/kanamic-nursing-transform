@@ -279,9 +279,12 @@ async function main(): Promise<void> {
 
       // SmartHR 自動補登を有効化（部署を問わず Sheet スタッフを登録）
       if (smarthr) {
-        const staffSync = new StaffSyncService(smarthr, auth);
+        const staffSync = new StaffSyncService(smarthr, auth, {
+          cd: loc.hamOfficeCode,  // TRITRUS 事業所コード（Phase2 事業所設定で使用）
+          name: loc.stationName,
+        });
         workflow.setStaffAutoRegister(smarthr, staffSync);
-        logger.info(`[${loc.name}] スタッフ自動補登: 有効（SmartHR 経由）`);
+        logger.info(`[${loc.name}] スタッフ自動補登: 有効（SmartHR 経由, 事業所=${loc.stationName}）`);
       }
 
       // コンテキスト作成

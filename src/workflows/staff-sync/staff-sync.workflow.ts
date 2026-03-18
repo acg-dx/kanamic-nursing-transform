@@ -39,8 +39,14 @@ const TRITRUS_STAFF_ADD = '/tritrus/staffInfo/staffInfoAdd?executeFlag=0&flg=add
 const TRITRUS_MASTER = '/tritrus/master/';
 const BASE_URL = 'https://portal.kanamic.net';
 
-/** 姶良事業所情報 */
-const AIRA_OFFICE = {
+/** 事業所情報 */
+export interface OfficeInfo {
+  cd: string;
+  name: string;
+}
+
+/** デフォルト事業所（姶良） */
+const DEFAULT_OFFICE: OfficeInfo = {
   cd: '4664590280',
   name: '訪問看護ステーションあおぞら姶良',
 };
@@ -106,10 +112,12 @@ export interface StaffSyncDetail {
 export class StaffSyncService {
   private smarthr: SmartHRService;
   private auth: KanamickAuthService;
+  private office: OfficeInfo;
 
-  constructor(smarthr: SmartHRService, auth: KanamickAuthService) {
+  constructor(smarthr: SmartHRService, auth: KanamickAuthService, office?: OfficeInfo) {
     this.smarthr = smarthr;
     this.auth = auth;
+    this.office = office || DEFAULT_OFFICE;
   }
 
   /**
@@ -528,7 +536,7 @@ export class StaffSyncService {
       if (el) el.textContent = office.cd;
       el = document.getElementById('officeName');
       if (el) el.textContent = office.name;
-    }, AIRA_OFFICE);
+    }, this.office);
 
     // === 情報有効期間はデフォルト値のまま ===
 
@@ -1098,10 +1106,10 @@ export class StaffSyncService {
         }
       }
       return false;
-    }, AIRA_OFFICE.cd);
+    }, this.office.cd);
 
     if (officeAlreadySet) {
-      logger.info(`Phase2 事業所設定: ${AIRA_OFFICE.name} (${AIRA_OFFICE.cd}) は既に設定済み — スキップ`);
+      logger.info(`Phase2 事業所設定: ${this.office.name} (${this.office.cd}) は既に設定済み — スキップ`);
       return;
     }
 
@@ -1145,14 +1153,14 @@ export class StaffSyncService {
     // iframe 内: 事業所名で検索
     const searchFieldExists = await iframe.$('input[name="queryCareofficeName"]');
     if (searchFieldExists) {
-      await iframe.fill('input[name="queryCareofficeName"]', AIRA_OFFICE.name);
+      await iframe.fill('input[name="queryCareofficeName"]', this.office.name);
     } else {
       await iframe.evaluate((officeName) => {
         const el = document.querySelector('input[name*="officeName"], input[name*="office"]') as HTMLInputElement;
         if (el) el.value = officeName;
-      }, AIRA_OFFICE.name);
+      }, this.office.name);
     }
-    logger.debug(`Phase2 事業所検索: ${AIRA_OFFICE.name}`);
+    logger.debug(`Phase2 事業所検索: ${this.office.name}`);
 
     // 検索ボタンクリック
     const searchBtn = await iframe.$('input[type="submit"][value*="検索"], input[type="button"][value*="検索"], a:has-text("検索")');
@@ -1283,10 +1291,10 @@ export class StaffSyncService {
         }
       }
       return { success: false, officeTableFound };
-    }, AIRA_OFFICE.cd);
+    }, this.office.cd);
 
     if (verifyResult.success) {
-      logger.info(`Phase2 事業所設定完了: ${AIRA_OFFICE.name} が登録されました`);
+      logger.info(`Phase2 事業所設定完了: ${this.office.name} が登録されました`);
     } else {
       logger.warn(`Phase2 事業所設定: 登録確認できず (officeTableFound=${verifyResult.officeTableFound})`);
     }
