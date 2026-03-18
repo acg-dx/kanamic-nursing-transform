@@ -189,7 +189,6 @@ async function main(): Promise<void> {
 
     for (const [index, loc] of locations.entries()) {
       const isFirstLocation = index === 0;
-      const shouldUseLegacyCsvFlow = isFirstLocation && loc.name === '姶良';
       logger.info(`=== ${loc.name} 処理開始 ===`);
 
       const auth = new KanamickAuthService({
@@ -232,43 +231,29 @@ async function main(): Promise<void> {
       // === Step 0: 利用者マスタ CSV（事業所ごと） ===
       const patientMaster = new PatientMasterService();
 
-      if (shouldUseLegacyCsvFlow) {
-        if (csvMode === 'local') {
-          const resolvedCsvPath = path.resolve(explicitCsv!);
-          await patientMaster.loadFromCsv(resolvedCsvPath);
-          logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカル CSV）`);
-        } else {
-          // ローカルにデフォルト CSV がある場合はフォールバックとして先に読み込む
-          const defaultCsvPath = path.resolve(DEFAULT_CSV);
-          const fs = await import('fs');
-          if (fs.existsSync(defaultCsvPath)) {
-            await patientMaster.loadFromCsv(defaultCsvPath);
-            logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（デフォルト CSV フォールバック）`);
-          }
-
-          // CSV 自動取得 (ローカルキャッシュ優先、なければ HAM からダウンロード)
-          try {
-            const csvDownloader = new PatientCsvDownloaderService(auth);
-            const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
-            const localCsv = csvDownloader.findLocalCsv(targetMonth);
-            if (localCsv) {
-              await patientMaster.loadFromCsv(localCsv);
-              logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカルキャッシュ）`);
-            } else {
-              await auth.login();
-              const csvPath = await csvDownloader.downloadPatientCsv({ targetMonth });
-              await patientMaster.loadFromCsv(csvPath);
-              logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（HAM ダウンロード）`);
-            }
-          } catch (csvError) {
-            if (patientMaster.count === 0) {
-              throw new Error(`利用者マスタ CSV の取得に失敗しました: ${(csvError as Error).message}`);
-            }
-            logger.warn(`[${loc.name}] CSV 自動ダウンロード失敗、デフォルト CSV で続行: ${(csvError as Error).message}`);
-          }
-        }
+      if (csvMode === 'local' && isFirstLocation) {
+        // --csv= 明示指定は最初の事業所のみ（後方互換）
+        const resolvedCsvPath = path.resolve(explicitCsv!);
+        await patientMaster.loadFromCsv(resolvedCsvPath);
+        logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカル CSV）`);
       } else {
-        logger.info(`[${loc.name}] 利用者マスタ CSV 自動取得はスキップ（姶良のみ従来ロジック適用）`);
+        // CSV 自動取得 (ローカルキャッシュ優先、なければ HAM からダウンロード)
+        try {
+          const csvDownloader = new PatientCsvDownloaderService(auth);
+          const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
+          const localCsv = csvDownloader.findLocalCsv(targetMonth);
+          if (localCsv) {
+            await patientMaster.loadFromCsv(localCsv);
+            logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカルキャッシュ）`);
+          } else {
+            await auth.login();
+            const csvPath = await csvDownloader.downloadPatientCsv({ targetMonth });
+            await patientMaster.loadFromCsv(csvPath);
+            logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（HAM ダウンロード）`);
+          }
+        } catch (csvError) {
+          logger.warn(`[${loc.name}] CSV 自動ダウンロード失敗（転記は続行）: ${(csvError as Error).message}`);
+        }
       }
 
       // === 事業所ごと HAM ログイン ===
