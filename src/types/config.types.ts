@@ -1,6 +1,10 @@
 export interface SheetLocation {
   name: string;
   sheetId: string;
+  /** HAM 事業所名（TRITRUS ポータルのリンクテキスト） */
+  stationName: string;
+  /** HAM 事業所コード（goCicHam.jsp の h パラメータ） */
+  hamOfficeCode: string;
 }
 
 export interface AppConfig {

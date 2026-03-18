@@ -1,7 +1,7 @@
 /**
  * 転記実行スクリプト
  *
- * 姶良事業所の Google Sheets データを HAM に転記する。
+ * 複数事業所の Google Sheets データを HAM に転記する。
  *
  * 前提条件:
  *   1. スタッフ同期が完了していること (run-staff-sync.ts)
@@ -24,6 +24,7 @@ dotenv.config();
 
 import path from 'path';
 import { logger } from '../core/logger';
+import { loadConfig } from '../config/app.config';
 
 // Ctrl+C で即座に終了（async chain が SIGINT を飲み込むのを防止）
 process.on('SIGINT', () => {
@@ -100,7 +101,7 @@ async function sendErrorNotification(errorMessage: string): Promise<void> {
     date: today,
     reports: [{
       workflowName: 'transcription',
-      locationName: '姶良',
+      locationName: 'system',
       success: false,
       totalRecords: 0,
       processedRecords: 0,
@@ -117,9 +118,6 @@ async function sendErrorNotification(errorMessage: string): Promise<void> {
   logger.info('エラー通知メール送信完了');
 }
 
-/** 姶良事業所 Sheet ID */
-const AIRA_SHEET_ID = '12lzQUObLw0ymZdTRPpBWqECRkRimMXO7-m9maWPUt6M';
-
 /** デフォルト CSV ファイルパス（現在の年月で自動生成） */
 const DEFAULT_CSV = `./4664590280_userallfull_${PatientCsvDownloaderService.getCurrentMonth()}.csv`;
 
@@ -132,43 +130,29 @@ async function main(): Promise<void> {
   const limit = limitArg ? parseInt(limitArg, 10) : 0;
   const tabArg = args.find(a => a.startsWith('--tab='))?.split('=')[1] || undefined;
   const csvMode = explicitCsv ? 'local' : 'auto';
+  const config = loadConfig();
+  const locations = config.sheets.locations;
+
+  if (locations.length === 0) {
+    throw new Error('処理対象の事業所が設定されていません（config.sheets.locations）');
+  }
 
   logger.info('========================================');
   logger.info('  転記実行');
-  logger.info(`  事業所: 姶良`);
-  logger.info(`  Sheet ID: ${AIRA_SHEET_ID}`);
+  logger.info(`  対象事業所: ${locations.map(loc => loc.name).join(', ')}`);
+  logger.info(`  事業所数: ${locations.length}`);
   logger.info(`  CSV モード: ${csvMode === 'local' ? `ローカル (${explicitCsv})` : 'HAM 自動ダウンロード'}`);
   logger.info(`  ドライラン: ${dryRun}`);
   if (tabArg) logger.info(`  対象タブ: ${tabArg}`);
   if (limit > 0) logger.info(`  レコード上限: ${limit}`);
   logger.info('========================================');
 
-  // === Step 0: 利用者マスタ CSV (ローカル指定時は先に読み込み) ===
-  const patientMaster = new PatientMasterService();
-  if (csvMode === 'local') {
-    const resolvedCsvPath = path.resolve(explicitCsv!);
-    await patientMaster.loadFromCsv(resolvedCsvPath);
-    logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（ローカル CSV）`);
-  } else {
-    // ローカルにデフォルト CSV がある場合はフォールバックとして先に読み込む
-    const defaultCsvPath = path.resolve(DEFAULT_CSV);
-    const fs = await import('fs');
-    if (fs.existsSync(defaultCsvPath)) {
-      await patientMaster.loadFromCsv(defaultCsvPath);
-      logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（デフォルト CSV フォールバック）`);
-    }
-    // HAM からの自動ダウンロードはブラウザ起動後に実行
-  }
-
-  // === Step 0.5: SmartHR からスタッフ資格マップ構築 ===
-  // 注意: 部署フィルタは使わない。Sheet 内の全スタッフを emp_code で直接検索する。
-  // SmartHR は資格情報の参照元であり、部署に関係なく全スタッフの資格が必要。
+  // === 共有サービス初期化 ===
   const smarthrToken = process.env.SMARTHR_ACCESS_TOKEN;
-  const staffQualifications = new Map<string, string[]>();
   let smarthr: SmartHRService | null = null;
 
   const sheets = new SpreadsheetService(
-    process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || './kangotenki.json'
+    config.sheets.serviceAccountKeyPath
   );
 
   if (smarthrToken) {
@@ -176,35 +160,14 @@ async function main(): Promise<void> {
       baseUrl: process.env.SMARTHR_BASE_URL || 'https://acg.smarthr.jp/api/v1',
       accessToken: smarthrToken,
     });
-
-    // Sheet から全スタッフの従業員番号を取得（部署フィルタなし）
-    const sheetRecords = await sheets.getTranscriptionRecords(AIRA_SHEET_ID, tabArg);
-    const empCodes = [...new Set(sheetRecords.map(r => r.staffNumber).filter(Boolean))];
-    logger.info(`Sheet 内ユニークスタッフ: ${empCodes.length}名 → SmartHR で資格検索`);
-
-    // emp_code で直接 SmartHR 検索（部署フィルタなし）
-    const crewMap = await smarthr.getCrewsByEmpCodes(empCodes);
-    logger.info(`SmartHR 検索結果: ${crewMap.size}/${empCodes.length}名`);
-
-    for (const [, crew] of crewMap) {
-      const entry = smarthr.toStaffMasterEntry(crew);
-      if (entry.staffName && entry.qualifications.length > 0) {
-        staffQualifications.set(entry.staffName, entry.qualifications);
-      }
-    }
-
-    logger.info(`スタッフ資格マップ: ${staffQualifications.size}名分構築完了`);
-    for (const [name, quals] of staffQualifications) {
-      logger.debug(`  ${name}: [${quals.join(', ')}]`);
-    }
   } else {
     logger.warn('SMARTHR_ACCESS_TOKEN 未設定: スタッフ資格チェック＋自動補登はスキップされます');
   }
 
   // 環境変数チェック
-  const kanamickUrl = process.env.KANAMICK_URL;
-  const kanamickUser = process.env.KANAMICK_USERNAME;
-  const kanamickPass = process.env.KANAMICK_PASSWORD;
+  const kanamickUrl = process.env.KANAMICK_URL || config.kanamick.url;
+  const kanamickUser = process.env.KANAMICK_USERNAME || config.kanamick.username;
+  const kanamickPass = process.env.KANAMICK_PASSWORD || config.kanamick.password;
   if (!kanamickUrl || !kanamickUser || !kanamickPass) {
     logger.error('KANAMICK_URL, KANAMICK_USERNAME, KANAMICK_PASSWORD が必要です');
     process.exit(1);
@@ -217,134 +180,218 @@ async function main(): Promise<void> {
   );
   const selectorEngine = new SelectorEngine(aiHealing);
   const browser = new BrowserManager(selectorEngine);
-  const auth = new KanamickAuthService({
-    url: kanamickUrl,
-    username: kanamickUser,
-    password: kanamickPass,
-    stationName: process.env.KANAMICK_STATION_NAME || '訪問看護ステーションあおぞら姶良',
-    hamOfficeKey: process.env.KANAMICK_HAM_OFFICE_KEY || '6',
-    hamOfficeCode: process.env.KANAMICK_HAM_OFFICE_CODE || '400021814',
-  });
 
   try {
-    // ブラウザ起動
+    // ブラウザ起動（全事業所で共有）
     await browser.launch();
-    auth.setContext(browser.browserContext);
 
-    // === CSV 自動取得 (ローカルキャッシュ優先、なければ HAM からダウンロード) ===
-    if (csvMode === 'auto') {
-      try {
-        const csvDownloader = new PatientCsvDownloaderService(auth);
-        const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
-        // ローカルにあればそのまま使う（HAM ログイン不要）
-        const localCsv = csvDownloader.findLocalCsv(targetMonth);
-        if (localCsv) {
-          await patientMaster.loadFromCsv(localCsv);
-          logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（ローカルキャッシュ）`);
+    const allResults: WorkflowResult[] = [];
+
+    for (const [index, loc] of locations.entries()) {
+      const isFirstLocation = index === 0;
+      const shouldUseLegacyCsvFlow = isFirstLocation && loc.name === '姶良';
+      logger.info(`=== ${loc.name} 処理開始 ===`);
+
+      const auth = new KanamickAuthService({
+        url: kanamickUrl,
+        username: kanamickUser,
+        password: kanamickPass,
+        stationName: loc.stationName,
+        hamOfficeKey: '6',
+        hamOfficeCode: loc.hamOfficeCode,
+      });
+      auth.setContext(browser.browserContext);
+
+      // === Step 0.5: SmartHR からスタッフ資格マップ構築（事業所ごと） ===
+      // 注意: 部署フィルタは使わない。Sheet 内の全スタッフを emp_code で直接検索する。
+      // SmartHR は資格情報の参照元であり、部署に関係なく全スタッフの資格が必要。
+      const staffQualifications = new Map<string, string[]>();
+      if (smarthr) {
+        const sheetRecords = await sheets.getTranscriptionRecords(loc.sheetId, tabArg);
+        const empCodes = [...new Set(sheetRecords.map(r => r.staffNumber).filter(Boolean))];
+        logger.info(`[${loc.name}] Sheet 内ユニークスタッフ: ${empCodes.length}名 → SmartHR で資格検索`);
+
+        if (empCodes.length > 0) {
+          const crewMap = await smarthr.getCrewsByEmpCodes(empCodes);
+          logger.info(`[${loc.name}] SmartHR 検索結果: ${crewMap.size}/${empCodes.length}名`);
+
+          for (const [, crew] of crewMap) {
+            const entry = smarthr.toStaffMasterEntry(crew);
+            if (entry.staffName && entry.qualifications.length > 0) {
+              staffQualifications.set(entry.staffName, entry.qualifications);
+            }
+          }
+        }
+
+        logger.info(`[${loc.name}] スタッフ資格マップ: ${staffQualifications.size}名分構築完了`);
+        for (const [name, quals] of staffQualifications) {
+          logger.debug(`  ${name}: [${quals.join(', ')}]`);
+        }
+      }
+
+      // === Step 0: 利用者マスタ CSV（事業所ごと） ===
+      const patientMaster = new PatientMasterService();
+
+      if (shouldUseLegacyCsvFlow) {
+        if (csvMode === 'local') {
+          const resolvedCsvPath = path.resolve(explicitCsv!);
+          await patientMaster.loadFromCsv(resolvedCsvPath);
+          logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカル CSV）`);
         } else {
-          // ローカルにないので HAM からダウンロード
-          await auth.login();
-          const csvPath = await csvDownloader.downloadPatientCsv({ targetMonth });
-          await patientMaster.loadFromCsv(csvPath);
-          logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（HAM ダウンロード）`);
-        }
-      } catch (csvError) {
-        if (patientMaster.count === 0) {
-          throw new Error(`利用者マスタ CSV の取得に失敗しました: ${(csvError as Error).message}`);
-        }
-        logger.warn(`CSV 自動ダウンロード失敗、デフォルト CSV で続行: ${(csvError as Error).message}`);
-      }
-    }
+          // ローカルにデフォルト CSV がある場合はフォールバックとして先に読み込む
+          const defaultCsvPath = path.resolve(DEFAULT_CSV);
+          const fs = await import('fs');
+          if (fs.existsSync(defaultCsvPath)) {
+            await patientMaster.loadFromCsv(defaultCsvPath);
+            logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（デフォルト CSV フォールバック）`);
+          }
 
-    // === 前月未登録チェック（pre-flight） ===
-    try {
-      const reconciliation = new ReconciliationService(sheets);
-      const prevResult = await reconciliation.checkPreviousMonthUnregistered(AIRA_SHEET_ID);
-      if (prevResult.hasPending) {
-        logger.warn(`[姶良] 前月に未登録レコード ${prevResult.pendingCount} 件を検出！ 先に前月分を処理してください。`);
+          // CSV 自動取得 (ローカルキャッシュ優先、なければ HAM からダウンロード)
+          try {
+            const csvDownloader = new PatientCsvDownloaderService(auth);
+            const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
+            const localCsv = csvDownloader.findLocalCsv(targetMonth);
+            if (localCsv) {
+              await patientMaster.loadFromCsv(localCsv);
+              logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（ローカルキャッシュ）`);
+            } else {
+              await auth.login();
+              const csvPath = await csvDownloader.downloadPatientCsv({ targetMonth });
+              await patientMaster.loadFromCsv(csvPath);
+              logger.info(`[${loc.name}] 利用者マスタ: ${patientMaster.count}名読み込み完了（HAM ダウンロード）`);
+            }
+          } catch (csvError) {
+            if (patientMaster.count === 0) {
+              throw new Error(`利用者マスタ CSV の取得に失敗しました: ${(csvError as Error).message}`);
+            }
+            logger.warn(`[${loc.name}] CSV 自動ダウンロード失敗、デフォルト CSV で続行: ${(csvError as Error).message}`);
+          }
+        }
       } else {
-        logger.info('前月未登録チェック: 問題なし');
+        logger.info(`[${loc.name}] 利用者マスタ CSV 自動取得はスキップ（姶良のみ従来ロジック適用）`);
       }
-    } catch (error) {
-      logger.warn(`前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
-    }
 
-    // ワークフロー作成 + マスタ設定
-    const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
-    workflow.setPatientMaster(patientMaster);
-    workflow.setStaffQualifications(staffQualifications);
+      // === 事業所ごと HAM ログイン ===
+      await auth.login();
 
-    // SmartHR 自動補登を有効化（部署を問わず Sheet スタッフを登録）
-    if (smarthr) {
-      const staffSync = new StaffSyncService(smarthr, auth);
-      workflow.setStaffAutoRegister(smarthr, staffSync);
-      logger.info('スタッフ自動補登: 有効（SmartHR 経由）');
-    }
-
-    // コンテキスト作成
-    const context: WorkflowContext = {
-      workflowName: 'transcription',
-      startedAt: new Date(),
-      dryRun,
-      locations: [{ name: '姶良', sheetId: AIRA_SHEET_ID }],
-      tab: tabArg,
-    };
-
-    // 転記実行
-    const startTime = Date.now();
-    const results = await workflow.run(context);
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-
-    // 結果レポート
-    const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
-    const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
-    const totalRecords = results.reduce((sum, r) => sum + r.totalRecords, 0);
-
-    logger.info('========================================');
-    logger.info('  転記結果');
-    logger.info(`  対象レコード: ${totalRecords}`);
-    logger.info(`  処理完了: ${totalProcessed}`);
-    logger.info(`  エラー: ${totalErrors}`);
-    logger.info(`  所要時間: ${elapsed}秒`);
-    logger.info('========================================');
-
-    // エラー詳細
-    for (const r of results) {
-      if (r.errors.length > 0) {
-        logger.info(`--- ${r.locationName} エラー詳細 ---`);
-        for (const e of r.errors) {
-          logger.info(`  ${e.recordId}: [${e.category}] ${e.message}`);
+      // === 前月未登録チェック（pre-flight, 事業所ごと） ===
+      try {
+        const reconciliation = new ReconciliationService(sheets);
+        const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
+        if (prevResult.hasPending) {
+          logger.warn(`[${loc.name}] 前月に未登録レコード ${prevResult.pendingCount} 件を検出！ 先に前月分を処理してください。`);
+        } else {
+          logger.info(`[${loc.name}] 前月未登録チェック: 問題なし`);
         }
+      } catch (error) {
+        logger.warn(`[${loc.name}] 前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
       }
-    }
 
-    // === 削除ワークフロー ===
-    const allResults: WorkflowResult[] = [...results];
-    try {
-      logger.info('========================================');
-      logger.info('  削除処理開始');
-      logger.info('========================================');
-      const deletionWorkflow = new DeletionWorkflow(browser, selectorEngine, sheets, auth);
-      const deletionContext: WorkflowContext = {
-        workflowName: 'deletion',
+      // ワークフロー作成 + マスタ設定
+      const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
+      workflow.setPatientMaster(patientMaster);
+      workflow.setStaffQualifications(staffQualifications);
+
+      // SmartHR 自動補登を有効化（部署を問わず Sheet スタッフを登録）
+      if (smarthr) {
+        const staffSync = new StaffSyncService(smarthr, auth);
+        workflow.setStaffAutoRegister(smarthr, staffSync);
+        logger.info(`[${loc.name}] スタッフ自動補登: 有効（SmartHR 経由）`);
+      }
+
+      // コンテキスト作成
+      const context: WorkflowContext = {
+        workflowName: 'transcription',
         startedAt: new Date(),
         dryRun,
-        locations: [{ name: '姶良', sheetId: AIRA_SHEET_ID }],
+        locations: [{
+          name: loc.name,
+          sheetId: loc.sheetId,
+          stationName: loc.stationName,
+          hamOfficeCode: loc.hamOfficeCode,
+        }],
+        tab: tabArg,
       };
-      const deletionResults = await deletionWorkflow.run(deletionContext);
-      allResults.push(...deletionResults);
 
-      const delProcessed = deletionResults.reduce((sum, r) => sum + r.processedRecords, 0);
-      const delErrors = deletionResults.reduce((sum, r) => sum + r.errorRecords, 0);
-      logger.info(`削除結果: 処理=${delProcessed}, エラー=${delErrors}`);
-    } catch (delError) {
-      logger.error(`削除ワークフローエラー（転記は完了済み）: ${(delError as Error).message}`);
+      // 転記実行
+      const startTime = Date.now();
+      const results = await workflow.run(context);
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      allResults.push(...results);
+
+      // 結果レポート（事業所単位）
+      const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
+      const totalRecords = results.reduce((sum, r) => sum + r.totalRecords, 0);
+      logger.info(`[${loc.name}] 転記結果: 対象=${totalRecords}, 完了=${totalProcessed}, エラー=${totalErrors}, 所要=${elapsed}秒`);
+
+      // エラー詳細
+      for (const r of results) {
+        if (r.errors.length > 0) {
+          logger.info(`--- ${r.locationName} エラー詳細 ---`);
+          for (const e of r.errors) {
+            logger.info(`  ${e.recordId}: [${e.category}] ${e.message}`);
+          }
+        }
+      }
+
+      // === 削除ワークフロー ===
+      try {
+        logger.info('========================================');
+        logger.info(`  ${loc.name} 削除処理開始`);
+        logger.info('========================================');
+        const deletionWorkflow = new DeletionWorkflow(browser, selectorEngine, sheets, auth);
+        const deletionContext: WorkflowContext = {
+          workflowName: 'deletion',
+          startedAt: new Date(),
+          dryRun,
+          locations: [{
+            name: loc.name,
+            sheetId: loc.sheetId,
+            stationName: loc.stationName,
+            hamOfficeCode: loc.hamOfficeCode,
+          }],
+        };
+        const deletionResults = await deletionWorkflow.run(deletionContext);
+        allResults.push(...deletionResults);
+
+        const delProcessed = deletionResults.reduce((sum, r) => sum + r.processedRecords, 0);
+        const delErrors = deletionResults.reduce((sum, r) => sum + r.errorRecords, 0);
+        logger.info(`[${loc.name}] 削除結果: 処理=${delProcessed}, エラー=${delErrors}`);
+      } catch (delError) {
+        logger.error(`[${loc.name}] 削除ワークフローエラー（転記は完了済み）: ${(delError as Error).message}`);
+      }
+
+      // 次事業所へ向けた軽いクリーンアップ
+      try {
+        await auth.navigateToMainMenu();
+      } catch (navError) {
+        logger.warn(`[${loc.name}] メインメニュー復帰に失敗（次事業所で再ログイン継続）: ${(navError as Error).message}`);
+      }
+
+      const pages = browser.browserContext.pages();
+      for (let i = pages.length - 1; i >= 1; i--) {
+        await pages[i].close().catch(() => {});
+      }
+
+      logger.info(`=== ${loc.name} 処理終了 ===`);
     }
 
-    // メール通知（転記+削除結果をまとめて送信）
+    const aggregatedProcessed = allResults.reduce((sum, r) => sum + r.processedRecords, 0);
+    const aggregatedErrors = allResults.reduce((sum, r) => sum + r.errorRecords, 0);
+    const aggregatedRecords = allResults.reduce((sum, r) => sum + r.totalRecords, 0);
+
+    logger.info('========================================');
+    logger.info('  全事業所 処理結果');
+    logger.info(`  対象レコード: ${aggregatedRecords}`);
+    logger.info(`  処理完了: ${aggregatedProcessed}`);
+    logger.info(`  エラー: ${aggregatedErrors}`);
+    logger.info('========================================');
+
+    // メール通知（全事業所の転記+削除結果をまとめて送信）
     await sendNotification(allResults);
 
-    if (totalErrors > 0) {
+    if (aggregatedErrors > 0) {
       process.exit(1);
     }
   } catch (error) {
