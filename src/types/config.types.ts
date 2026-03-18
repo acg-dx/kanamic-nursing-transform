@@ -5,6 +5,8 @@ export interface SheetLocation {
   stationName: string;
   /** HAM 事業所コード（goCicHam.jsp の h パラメータ） */
   hamOfficeCode: string;
+  /** TRITRUS 事業所コード（スタッフ同期 Phase2 で使用） */
+  tritrusOfficeCd: string;
 }
 
 export interface AppConfig {

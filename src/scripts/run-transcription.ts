@@ -280,7 +280,7 @@ async function main(): Promise<void> {
       // SmartHR 自動補登を有効化（部署を問わず Sheet スタッフを登録）
       if (smarthr) {
         const staffSync = new StaffSyncService(smarthr, auth, {
-          cd: loc.hamOfficeCode,  // TRITRUS 事業所コード（Phase2 事業所設定で使用）
+          cd: loc.tritrusOfficeCd,  // TRITRUS 事業所コード（Phase2 事業所設定で使用）
           name: loc.stationName,
         });
         workflow.setStaffAutoRegister(smarthr, staffSync);
@@ -292,12 +292,7 @@ async function main(): Promise<void> {
         workflowName: 'transcription',
         startedAt: new Date(),
         dryRun,
-        locations: [{
-          name: loc.name,
-          sheetId: loc.sheetId,
-          stationName: loc.stationName,
-          hamOfficeCode: loc.hamOfficeCode,
-        }],
+        locations: [loc],
         tab: tabArg,
       };
 
@@ -333,12 +328,7 @@ async function main(): Promise<void> {
           workflowName: 'deletion',
           startedAt: new Date(),
           dryRun,
-          locations: [{
-            name: loc.name,
-            sheetId: loc.sheetId,
-            stationName: loc.stationName,
-            hamOfficeCode: loc.hamOfficeCode,
-          }],
+          locations: [loc],
         };
         const deletionResults = await deletionWorkflow.run(deletionContext);
         allResults.push(...deletionResults);

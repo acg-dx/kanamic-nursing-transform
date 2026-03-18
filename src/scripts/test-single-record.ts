@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       workflowName: 'transcription',
       startedAt: new Date(),
       dryRun: false,
-      locations: [{ name: '姶良', sheetId: AIRA_SHEET_ID, stationName: '訪問看護ステーションあおぞら姶良', hamOfficeCode: '400021814' }],
+      locations: [{ name: '姶良', sheetId: AIRA_SHEET_ID, stationName: '訪問看護ステーションあおぞら姶良', hamOfficeCode: '400021814', tritrusOfficeCd: '4664590280' }],
       tab: tabArg,
       targetRecordIds: [recordIdArg],
     };
