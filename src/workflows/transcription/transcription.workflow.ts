@@ -234,8 +234,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
               // 必要に応じて再ログイン。その後メインメニュー → k2_1 まで再遷移。
               // 全体を3分タイムアウトで保護（各ステップのハングを防止）
               const errMsg = _err?.message || '';
-              const isServerError = ['メモリ不足', '開けません', 'サーバーエラー', '一時的に利用できません',
-                'E00010', 'syserror', 'chrome-error', 'net::'].some(k => errMsg.includes(k));
+              const isServerError = ['メモリ不足', 'このページを開けません', 'Out of Memory',
+                'サーバーエラー', '一時的に利用できません',
+                'E00010', 'syserror', 'chrome-error', 'net::', 'Execution context was destroyed',
+                'クラッシュ', 'Target closed', 'Session closed'].some(k => errMsg.includes(k));
 
               if (isServerError) {
                 // HAM サーバー側のエラー → サーバー復旧を待ってからリトライ
@@ -250,6 +252,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
               );
               await Promise.race([
                 (async () => {
+                  // OOM / Execution context destroyed の場合、ページを先にリロード
+                  if (errMsg.includes('Execution context was destroyed') || errMsg.includes('メモリ不足') || errMsg.includes('Out of Memory')) {
+                    try {
+                      const hamPage = nav.hamPage;
+                      logger.info('OOM/コンテキスト破壊検出 → HAM ページをリロード');
+                      await hamPage.reload({ waitUntil: 'load', timeout: 30000 });
+                      await this.sleep(3000);
+                    } catch (reloadErr) {
+                      logger.warn(`HAM リロード失敗: ${(reloadErr as Error).message}`);
+                    }
+                  }
                   // ブラウザ/ページが閉じている場合は ensureLoggedIn で再ログイン
                   // ensureLoggedIn はメモリ不足/syserror等のサーバーエラーも検出し、
                   // ページリロード→再ログインを自動実行する
@@ -2670,7 +2683,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         return;
       }
 
-      // フレーム内の OOM / chrome-error チェック
+      // フレーム内エラーチェック（chrome-error, syserror, メモリ不足ページ）
+      const oomKeywords = ['メモリが不足している', 'このページを開けません', 'Out of Memory',
+        'メモリ不足', '開けません'];
       const allFrames = hamPage.frames();
       for (const frame of allFrames) {
         const url = frame.url();
@@ -2678,8 +2693,6 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           logger.warn(`フレーム内 Chrome エラー検出 → HAM ページをリロードします`);
           await hamPage.reload({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
           await this.sleep(3000);
-          logger.info('フレーム Chrome エラーからリロードで復旧');
-          // リロード後は t1-2（メインメニュー）に戻るので、呼び出し元で再処理が必要
           throw new Error('HAM フレームクラッシュ検出 — リロード済み、メインメニューから再開してください');
         }
         if (url.includes('syserror.jsp') || url.includes('error/syserror')) {
@@ -2688,10 +2701,38 @@ export class TranscriptionWorkflow extends BaseWorkflow {
             `HAM システムエラー検出 (syserror.jsp): ${content.substring(0, 200)}`
           );
         }
+        // フレーム内のメモリ不足/OOM テキスト検出
+        let frameEvalFailed = false;
+        const frameText = await frame.evaluate(() => document.body?.innerText || '').catch((err) => {
+          // evaluate 失敗 = Execution context destroyed = OOM の可能性
+          if (String(err.message).includes('Execution context was destroyed') ||
+              String(err.message).includes('Target closed')) {
+            frameEvalFailed = true;
+          }
+          return '';
+        });
+        const oomMatch = oomKeywords.find(k => frameText.includes(k));
+        if (frameEvalFailed || oomMatch) {
+          logger.warn(`フレーム内メモリ不足ページ検出: "${oomMatch}" → HAM ページをリロードします`);
+          await hamPage.reload({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+          await this.sleep(3000);
+          throw new Error(`HAM メモリ不足ページ検出 — リロード済み、メインメニューから再開してください`);
+        }
+      }
+
+      // トップレベルページのメモリ不足テキスト検出
+      const topText = await hamPage.evaluate(() => document.body?.innerText || '').catch(() => '');
+      const topOomMatch = oomKeywords.find(k => topText.includes(k));
+      if (topOomMatch) {
+        logger.warn(`HAM ページにメモリ不足検出: "${topOomMatch}" → リロードします`);
+        await hamPage.reload({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+        await this.sleep(3000);
+        throw new Error(`HAM メモリ不足ページ検出 — リロード済み、メインメニューから再開してください`);
       }
     } catch (e) {
       if ((e as Error).message.includes('syserror.jsp') ||
           (e as Error).message.includes('OOM') ||
+          (e as Error).message.includes('メモリ不足') ||
           (e as Error).message.includes('クラッシュ')) throw e;
       // フレームアクセスエラーは無視
     }

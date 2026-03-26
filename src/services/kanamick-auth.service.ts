@@ -325,22 +325,31 @@ export class KanamickAuthService {
       // HAM サーバー側エラー（メモリ不足、ページ開けない等）を検出
       // 長時間セッションで HAM がリソース不足になった場合に発生する
       const pageContent = await hamPage.evaluate(() => document.body?.innerText || '').catch(() => '');
-      const hamServerError = ['メモリ不足', '開けません', 'サーバーエラー', '一時的に利用できません',
+      const hamServerError = ['メモリが不足している', 'このページを開けません', 'Out of Memory',
+        'サーバーエラー', '一時的に利用できません',
         'E00010', '502 Bad Gateway', '503 Service', 'Internal Server Error'];
       const detectedError = hamServerError.find(keyword => pageContent.includes(keyword));
       if (detectedError) {
         logger.warn(`HAM サーバーエラー検出: "${detectedError}" — ページリロード後に再ログイン...`);
-        // HAM ページをリロードしてサーバー側のエラー状態をクリア
         await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
         this.isLoggedIn = false;
         return this.login();
       }
 
-      // フレーム内の syserror/エラーページも検出
+      // フレーム内のエラー検出（syserror、メモリ不足ページ等）
       for (const frame of frames) {
         const frameUrl = frame.url();
         if (frameUrl.includes('syserror') || frameUrl.includes('error/')) {
           logger.warn(`HAM フレームにエラーページ検出: ${frameUrl} — ページリロード後に再ログイン...`);
+          await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          this.isLoggedIn = false;
+          return this.login();
+        }
+        // フレーム内のメモリ不足/OOM エラーページ検出
+        const frameContent = await frame.evaluate(() => document.body?.innerText || '').catch(() => '');
+        const frameError = hamServerError.find(keyword => frameContent.includes(keyword));
+        if (frameError) {
+          logger.warn(`HAM フレーム内エラー検出: "${frameError}" — ページリロード後に再ログイン...`);
           await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
           this.isLoggedIn = false;
           return this.login();
