@@ -61,6 +61,10 @@ export const CJK_VARIANT_MAP: Record<string, string> = {
   '塚': '塚', // U+FA10 CJK互換 → U+585A
   '辻': '辻', // 一点しんにょう vs 二点（フォント依存だが念のため）
 
+  // 拡張漢字（CJK 拡張領域の異体字）
+  '㔟': '勢', // U+3517 — 伊㔟 → 伊勢
+  '𫝆': '今', // U+2B746 (CJK拡張D) — 𫝆村 → 今村
+
   // 人名用異体字（CJK 互換漢字で NFKC 非対応のもの）
   '髙': '高', // はしご高 (U+9AD9) — NFKC で未統一のケースがある環境向け
   '﨑': '崎', // たつさき (U+FA11) — NFKC で通常統一されるが念のため
@@ -110,11 +114,18 @@ export const CJK_VARIANT_MAP: Record<string, string> = {
  */
 export function normalizeCjkName(name: string): string {
   let result = name.normalize('NFKC');
+  // Variation Selectors を除去 (VS1-VS16: U+FE00-FE0F, VS17-VS256: U+E0100-E01EF)
+  // Google Sheets が付与する不可見文字で、文字列比較を妨げる (例: 榊󠄀 → 榊)
+  result = result.replace(/[\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g, '');
   for (const [old, replacement] of Object.entries(CJK_VARIANT_MAP)) {
     if (result.includes(old)) {
       result = result.replaceAll(old, replacement);
     }
   }
+  // ひらがな (U+3041-U+3096) → カタカナ (U+30A1-U+30F6) に統一
+  result = result.replace(/[\u3041-\u3096]/g, ch =>
+    String.fromCharCode(ch.charCodeAt(0) + 0x60)
+  );
   return result.replace(/[\s\u3000\u00a0]+/g, '').trim();
 }
 
@@ -138,6 +149,27 @@ export function normalizeCjkName(name: string): string {
  *   }, { variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
  */
 export const CJK_VARIANT_MAP_SERIALIZABLE = Object.entries(CJK_VARIANT_MAP);
+
+/**
+ * スタッフ名エイリアス（旧姓→新姓 等）
+ *
+ * Sheet 上の名前と HAM/SmartHR 上の登録名が異なる場合のマッピング。
+ * キー: Sheet 上の名前（空白除去済み）、値: HAM 上の登録名（空白除去済み）
+ */
+export const STAFF_NAME_ALIASES: Record<string, string> = {
+  '新盛裕望': '落合裕望',
+};
+
+/**
+ * スタッフ名をエイリアス解決する
+ *
+ * Sheet 名が HAM/SmartHR と異なる場合、STAFF_NAME_ALIASES で変換する。
+ * 一致しなければそのまま返す。
+ */
+export function resolveStaffAlias(name: string): string {
+  const normalized = name.replace(/[\s\u3000]+/g, '');
+  return STAFF_NAME_ALIASES[normalized] || normalized;
+}
 
 /**
  * 資格プレフィックスのリスト（明示的リスト — 汎用ダッシュ分割は使用しない）

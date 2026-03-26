@@ -1,0 +1,9 @@
+{"t":0,"agent":"system","event":"keyword_detected","keyword":"autopilot"}
+{"t":0.1,"agent":"system","event":"mode_change","mode_from":"none","mode_to":"autopilot"}
+{"t":0,"agent":"a5b8a7c","agent_type":"analyst","event":"agent_start","parent_mode":"autopilot"}
+{"t":0,"agent":"a4f13e7","agent_type":"architect","event":"agent_start","parent_mode":"autopilot"}
+{"t":0,"agent":"a7e604b","agent_type":"quality-reviewer","event":"agent_start","parent_mode":"autopilot"}
+{"t":0,"agent":"a206102","agent_type":"security-reviewer","event":"agent_start","parent_mode":"autopilot"}
+{"t":0,"agent":"a7e604b","agent_type":"quality-reviewer","event":"agent_stop","success":true,"duration_ms":125321}
+{"t":0,"agent":"a206102","agent_type":"security-reviewer","event":"agent_stop","success":true,"duration_ms":162367}
+{"t":0,"agent":"af80675","agent_type":"unknown","event":"agent_stop","success":true}

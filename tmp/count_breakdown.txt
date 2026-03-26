@@ -1,0 +1,17 @@
+=== Count breakdown to explain different totals ===
+
+  冨迫広美 看護医療 total (no filter): 123
+  永松アケミ 看護医療 total (no filter): 89
+  合計: 212
+
+  冨迫広美 看護医療 (with filter): 123
+  永松アケミ 看護医療 (with filter): 89
+  合計 (with filter): 212
+
+  冨迫広美 ALL records (with filter): 156
+  永松アケミ ALL records (with filter): 117
+  合計 ALL (with filter): 273
+
+  有村愛 ALL records with 准 (errors): 1
+  木場亜紗実 ALL records with 准 (errors): 1
+  合計 ALL errors: 275

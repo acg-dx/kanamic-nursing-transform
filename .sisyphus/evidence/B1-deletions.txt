@@ -1,0 +1,51 @@
+B1 — HAM Extra Record Deletion Evidence
+Generated: 2026-03-05 (manual Playwright session)
+
+== Summary ==
+Task: Delete 4 extra records from HAM that exist in HAM but NOT in the Google Sheet.
+Session: TRITRUS portal → goCicHam.jsp (h=400021814, k=6) → hamfromout.go
+Login: ACGPdx@aozora-cg.com / 訪問看護ステーションあおぞら姶良
+
+== Record 1: 窪田正浩 2026/02/06 17:30-17:59 川口千尋 ==
+Patient ID: 8876498 (窪田 正浩)
+Found: assignid=283, record2flag=0
+Row text: "6日 金 17:30 ～ 17:59 訪問看護基本療養費（Ⅰ・Ⅱ）... 川口 千尋(看護師)"
+Action: window.confirm override + confirmDelete() via evaluate + act_update submitted
+Verification: After act_update - has17_30=false, totalRecords=28 (deleted 1)
+Status: DELETED ✅
+
+== Record 2: 窪田正浩 2026/02/08 16:20-16:49 川口千尋 ==
+Patient ID: 8876498 (窪田 正浩)
+Found: assignid=339, record2flag=0
+Row text: "8日 日 16:20 ～ 16:49 訪問看護基本療養費（Ⅰ・Ⅱ）... 川口 千尋(看護師)"
+Action: delBtn.click() triggered confirmDelete; page.on('dialog') handler auto-accepted.
+        Browser MCP connection dropped before explicit act_update.
+Verification: On re-open, k2_2 for 窪田正浩 Feb 2026 shows no 16:20 entry on 8日.
+              8日 now only shows: 19:30～19:59 荒垣久美子(看護師)
+Status: DELETED ✅ (confirmed absent from HAM)
+
+== Record 3: 生野由美子 2026/02/21 12:00-12:59 ==
+Patient ID: 8879950 (生野 由美子)
+Found: assignid=873, record2flag=0
+Row text: "21日 土 12:00 ～ 12:59 精神科訪問看護基本療養費（Ⅰ・Ⅲ）"
+Action: window.confirm override + confirmDelete() via evaluate + act_update submitted
+Verification: {"success":true,"message":"21日 12:00 削除完了"} — has12_00=false
+Status: DELETED ✅
+
+== Record 4: 有田勉 2026/02/08 16:00-16:29 (重複2件中1件削除) ==
+Patient ID: 8876534 (有田 勉)
+Target: 8日 16:00～16:29 訪問看護基本療養費（Ⅰ・Ⅱ）(1 of 2 duplicates)
+Finding: Only 1 record at 16:00 found in k2_2 (assignid=473, no staff assigned).
+         Task said delete 1 of 2, keeping 1 to match 1 Google Sheet entry.
+         Current state: 1 in HAM = 1 in Sheet → correct final state already achieved.
+         (Duplicate may have been cleaned up by prior reconciliation or the earlier
+          browser crash deleted it implicitly.)
+Action: No further deletion performed — state is already at target.
+Status: ALREADY CORRECT ✅ (1 record remains as required)
+
+== Final State Verification ==
+- 窪田正浩 Feb 2026 k2_2: 28 records, no 17:30 on 6日, no 16:20 on 8日
+- 生野由美子 Feb 2026 k2_2: no 12:00 on 21日
+- 有田勉 Feb 2026 k2_2: 1 record at 16:00 on 8日 (assignid=473)
+
+All 4 target records: task complete.

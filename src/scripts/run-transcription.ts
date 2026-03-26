@@ -184,6 +184,7 @@ async function main(): Promise<void> {
   try {
     // ブラウザ起動（全事業所で共有）
     await browser.launch();
+    BrowserManager.logMemoryUsage('ブラウザ起動後');
 
     const allResults: WorkflowResult[] = [];
 
@@ -259,17 +260,41 @@ async function main(): Promise<void> {
       // === 事業所ごと HAM ログイン ===
       await auth.login();
 
-      // === 前月未登録チェック（pre-flight, 事業所ごと） ===
-      try {
-        const reconciliation = new ReconciliationService(sheets);
-        const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
-        if (prevResult.hasPending) {
-          logger.warn(`[${loc.name}] 前月に未登録レコード ${prevResult.pendingCount} 件を検出！ 先に前月分を処理してください。`);
-        } else {
-          logger.info(`[${loc.name}] 前月未登録チェック: 問題なし`);
+      // === 前月未登録チェック → 未登録があれば前月を先に転記 ===
+      if (!tabArg) {
+        try {
+          const reconciliation = new ReconciliationService(sheets);
+          const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
+          if (prevResult.hasPending) {
+            const now = new Date();
+            const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const prevTab = `${prev.getFullYear()}年${String(prev.getMonth() + 1).padStart(2, '0')}月`;
+            logger.warn(`[${loc.name}] 前月(${prevTab})に未登録レコード ${prevResult.pendingCount} 件を検出 → 前月を先に転記します`);
+
+            const prevWorkflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
+            prevWorkflow.setPatientMaster(patientMaster);
+            prevWorkflow.setStaffQualifications(staffQualifications);
+            if (smarthr) {
+              prevWorkflow.setStaffAutoRegister(smarthr);
+            }
+            const prevContext: WorkflowContext = {
+              workflowName: 'transcription',
+              startedAt: new Date(),
+              dryRun,
+              locations: [loc],
+              tab: prevTab,
+            };
+            const prevResults = await prevWorkflow.run(prevContext);
+            allResults.push(...prevResults);
+            const prevProcessed = prevResults.reduce((sum, r) => sum + r.processedRecords, 0);
+            const prevErrors = prevResults.reduce((sum, r) => sum + r.errorRecords, 0);
+            logger.info(`[${loc.name}] 前月(${prevTab})転記完了: 処理=${prevProcessed}, エラー=${prevErrors}`);
+          } else {
+            logger.info(`[${loc.name}] 前月未登録チェック: 問題なし`);
+          }
+        } catch (error) {
+          logger.warn(`[${loc.name}] 前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
         }
-      } catch (error) {
-        logger.warn(`[${loc.name}] 前月未登録チェックエラー（転記は続行）: ${(error as Error).message}`);
       }
 
       // ワークフロー作成 + マスタ設定
@@ -347,10 +372,8 @@ async function main(): Promise<void> {
         logger.warn(`[${loc.name}] メインメニュー復帰に失敗（次事業所で再ログイン継続）: ${(navError as Error).message}`);
       }
 
-      const pages = browser.browserContext.pages();
-      for (let i = pages.length - 1; i >= 1; i--) {
-        await pages[i].close().catch(() => {});
-      }
+      await browser.closeExtraPages();
+      BrowserManager.logMemoryUsage(`${loc.name} 処理後`);
 
       logger.info(`=== ${loc.name} 処理終了 ===`);
     }

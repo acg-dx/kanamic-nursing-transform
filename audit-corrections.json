@@ -1,0 +1,317 @@
+[
+  {
+    "tab": "2026年03月",
+    "row": 4,
+    "recordId": "121966",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "田中穂純",
+    "visitDate": "2026-03-01",
+    "startTime": "17:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 6,
+    "recordId": "121968",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "窪田正浩",
+    "visitDate": "2026-03-01",
+    "startTime": "18:30",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 8,
+    "recordId": "121967",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "有田勉",
+    "visitDate": "2026-03-01",
+    "startTime": "18:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 9,
+    "recordId": "121955",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "小濵士郎",
+    "visitDate": "2026-03-01",
+    "startTime": "09:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 14,
+    "recordId": "121965",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "溝口己喜男",
+    "visitDate": "2026-03-01",
+    "startTime": "16:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 15,
+    "recordId": "121958",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "川畑シゲ子",
+    "visitDate": "2026-03-01",
+    "startTime": "11:00",
+    "st1": "介護",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 17,
+    "recordId": "121969",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "榮博造",
+    "visitDate": "2026-03-01",
+    "startTime": "14:00",
+    "st1": "介護",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 19,
+    "recordId": "121977",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "瀧下絹子",
+    "visitDate": "2026-03-02",
+    "startTime": "10:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 21,
+    "recordId": "121987",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "東祐一郎",
+    "visitDate": "2026-03-02",
+    "startTime": "15:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 22,
+    "recordId": "121993",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "田中穂純",
+    "visitDate": "2026-03-02",
+    "startTime": "12:00",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 23,
+    "recordId": "121990",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "田中穂純",
+    "visitDate": "2026-03-02",
+    "startTime": "17:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 24,
+    "recordId": "121989",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "窪田正浩",
+    "visitDate": "2026-03-02",
+    "startTime": "18:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 26,
+    "recordId": "121997",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "有田勉",
+    "visitDate": "2026-03-02",
+    "startTime": "09:00",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 27,
+    "recordId": "121976",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "小濵士郎",
+    "visitDate": "2026-03-02",
+    "startTime": "09:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 28,
+    "recordId": "121995",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "小濵士郎",
+    "visitDate": "2026-03-02",
+    "startTime": "17:20",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 32,
+    "recordId": "121983",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "八木陽子",
+    "visitDate": "2026-03-02",
+    "startTime": "12:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 33,
+    "recordId": "121994",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "八木陽子",
+    "visitDate": "2026-03-02",
+    "startTime": "16:20",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 34,
+    "recordId": "122002",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "佐藤義久",
+    "visitDate": "2026-03-02",
+    "startTime": "15:00",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 39,
+    "recordId": "121985",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "溝口己喜男",
+    "visitDate": "2026-03-02",
+    "startTime": "10:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 40,
+    "recordId": "121988",
+    "bugs": [
+      "F-searchKbn(准看)"
+    ],
+    "patientName": "溝口己喜男",
+    "visitDate": "2026-03-02",
+    "startTime": "16:00",
+    "st1": "医療",
+    "st2": "通常（定期）",
+    "qualification": "准看護師"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 44,
+    "recordId": "121991",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "奴久妻由美子",
+    "visitDate": "2026-03-02",
+    "startTime": "10:00",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  },
+  {
+    "tab": "2026年03月",
+    "row": 45,
+    "recordId": "121998",
+    "bugs": [
+      "A-searchKbn(理学)",
+      "A-searchKbn(理学)"
+    ],
+    "patientName": "遠藤眞紀",
+    "visitDate": "2026-03-02",
+    "startTime": "10:00",
+    "st1": "医療",
+    "st2": "リハビリ",
+    "qualification": "理学療法士等"
+  }
+]

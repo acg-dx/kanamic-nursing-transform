@@ -45,9 +45,31 @@ export class BrowserManager {
 
   async launch(): Promise<void> {
     logger.info('ブラウザ起動中...');
+    const isContainer = process.env.K_SERVICE || process.env.DOCKER_ENV || process.platform === 'linux';
+    const args = [
+      '--disable-dev-shm-usage',      // /dev/shm 枯渇防止（コンテナ環境必須）
+      '--no-sandbox',                  // コンテナ内では不要
+      '--disable-gpu',                 // GPU メモリ割り当て無効化
+      '--disable-setuid-sandbox',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--metrics-recording-only',
+    ];
+    // --no-zygote / --single-process はコンテナ専用。
+    // Windows ではレンダラークラッシュ時にブラウザ全体が死ぬため使わない。
+    if (isContainer) {
+      args.push('--no-zygote', '--single-process');
+    }
     this.browser = await chromium.launch({
       headless: process.env.HEADLESS !== 'false',
       slowMo: parseInt(process.env.SLOW_MO || '0', 10),
+      args,
     });
     this.context = await this.browser.newContext({
       viewport: { width: 1920, height: 1080 },
@@ -96,9 +118,62 @@ export class BrowserManager {
     logger.info('ブラウザ起動完了');
   }
 
+  /** 余分なページを閉じてメモリを解放（最初のページだけ残す） */
+  async closeExtraPages(): Promise<void> {
+    if (!this.context) return;
+    const pages = this.context.pages();
+    let closed = 0;
+    for (let i = pages.length - 1; i >= 1; i--) {
+      await pages[i].close().catch(() => {});
+      closed++;
+    }
+    if (closed > 0) {
+      logger.debug(`余分なページを閉じました: ${closed}ページ`);
+    }
+  }
+
+  /** メモリ使用量をログ出力 */
+  static logMemoryUsage(label: string): void {
+    const mem = process.memoryUsage();
+    const rss = Math.round(mem.rss / 1024 / 1024);
+    const heap = Math.round(mem.heapUsed / 1024 / 1024);
+    const heapTotal = Math.round(mem.heapTotal / 1024 / 1024);
+    logger.info(`[メモリ] ${label}: RSS=${rss}MB, Heap=${heap}/${heapTotal}MB`);
+  }
+
+  /**
+   * ブラウザを完全に再起動（コンテキストが死んだ場合の復旧用）
+   * 古い browser を閉じ、新しい browser + context + page を作成する。
+   */
+  async relaunch(): Promise<void> {
+    logger.warn('ブラウザ再起動: コンテキスト死亡からの復旧');
+    await this.close();
+    await this.launch();
+  }
+
+  /** BrowserContext が生きているか確認 */
+  isContextAlive(): boolean {
+    try {
+      if (!this.context || !this.browser) {
+        logger.debug('isContextAlive: browser/context が null');
+        return false;
+      }
+      if (!this.browser.isConnected()) {
+        logger.debug('isContextAlive: browser.isConnected()=false');
+        return false;
+      }
+      const pages = this.context.pages();
+      logger.debug(`isContextAlive: OK (pages=${pages.length})`);
+      return true;
+    } catch (err) {
+      logger.debug(`isContextAlive: context.pages() 失敗: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
   async close(): Promise<void> {
     if (this.browser) {
-      await this.browser.close();
+      await this.browser.close().catch(() => {});
       this.browser = null;
       this.context = null;
       this._page = null;
@@ -108,7 +183,8 @@ export class BrowserManager {
 
   async navigate(url: string): Promise<void> {
     logger.info(`遷移先: ${url}`);
-    await this.page.goto(url, { waitUntil: 'networkidle' });
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
     await this.dismissPopups();
   }
 

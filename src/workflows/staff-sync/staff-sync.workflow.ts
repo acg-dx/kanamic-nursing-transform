@@ -45,6 +45,17 @@ export interface OfficeInfo {
   name: string;
 }
 
+/**
+ * 補登スキップ対象の従業員番号
+ * Sheet 上の番号と TRITRUS/CSV 上の番号が異なるため、別番号で既に登録済みのスタッフ。
+ * 例: Sheet=1382 → TRITRUS=1045（牛込智美）
+ */
+const SKIP_EMPLOYEE_NUMBERS = new Set([
+  '669',   // 高田衿湖 — TRITRUS 上は 2057
+  '1382',  // 牛込智美 — TRITRUS 上は 1045
+  '1182',  // 小川亜紀子 — TRITRUS 上は 1898
+]);
+
 /** デフォルト事業所（姶良） */
 const DEFAULT_OFFICE: OfficeInfo = {
   cd: '4664590280',
@@ -345,7 +356,7 @@ export class StaffSyncService {
    * 既にログイン済みの前提で、渡された StaffMasterEntry[] について
    * Phase 1 → 2 → 3 を実行する。
    */
-  async registerSpecificStaff(entries: StaffMasterEntry[]): Promise<StaffSyncResult> {
+  async registerSpecificStaff(entries: StaffMasterEntry[], validityStartDate?: string): Promise<StaffSyncResult> {
     const result: StaffSyncResult = { synced: 0, skipped: 0, errors: 0, details: [] };
     if (entries.length === 0) return result;
 
@@ -374,7 +385,48 @@ export class StaffSyncService {
         continue;
       }
 
-      // 既存チェック
+      // 番号不一致の既知スタッフをスキップ
+      if (SKIP_EMPLOYEE_NUMBERS.has(staff.staffNumber)) {
+        logger.debug(`補登スキップ（番号不一致の既知スタッフ）: ${staff.staffNumber} ${staff.staffName}`);
+        result.skipped++;
+        detail.phase1 = 'existing';
+        result.details.push(detail);
+        continue;
+      }
+
+      // 既存チェック: 従業員番号で TRITRUS 検索（名前マッチより確実）
+      if (staff.staffNumber) {
+        try {
+          const navResult = await this.navigateToStaffByEmpNo(page, staff.staffNumber);
+          if (navResult.found) {
+            if (!navResult.alreadyHasOffice) {
+              // 既存スタッフだが現事業所が未設定 → 事業所のみ追加
+              logger.info(`既存スタッフに事業所追加: ${staff.staffNumber} ${staff.staffName}`);
+              try {
+                const staffInfoUrl = page.url();
+                await this.addOfficeToStaffFromCurrentPage(page, staffInfoUrl);
+                detail.phase2 = 'set';
+                logger.info(`事業所追加完了: ${staff.staffNumber} ${staff.staffName}`);
+              } catch (err) {
+                detail.phase2 = 'error';
+                logger.error(`事業所追加失敗: ${staff.staffNumber} ${staff.staffName}: ${(err as Error).message}`);
+              }
+            } else {
+              logger.debug(`スタッフ既存（従業員番号検索）: ${staff.staffNumber} ${staff.staffName}`);
+            }
+            result.skipped++;
+            detail.phase1 = 'existing';
+            result.details.push(detail);
+            await this.tryRecoverToStaffIndex(page);
+            continue;
+          }
+        } catch {
+          // 検索失敗時は名前マッチにフォールバック
+          logger.debug(`従業員番号検索失敗、名前マッチにフォールバック: ${staff.staffNumber}`);
+        }
+      }
+
+      // フォールバック: 名前マッチ
       const { lastName, firstName } = this.splitName(staff.staffName);
       const fullName = `${lastName} ${firstName}`.trim();
       const isExisting = existingNames.some(
@@ -382,7 +434,7 @@ export class StaffSyncService {
       );
 
       if (isExisting) {
-        logger.debug(`スタッフ既存: ${staff.staffNumber} ${staff.staffName}`);
+        logger.debug(`スタッフ既存（名前マッチ）: ${staff.staffNumber} ${staff.staffName}`);
         result.skipped++;
         detail.phase1 = 'existing';
         result.details.push(detail);
@@ -417,7 +469,7 @@ export class StaffSyncService {
 
       // Phase 2: 詳細情報編集
       try {
-        await this.phase2_editDetails(page, staff);
+        await this.phase2_editDetails(page, staff, validityStartDate);
         detail.phase2 = 'set';
         logger.info(`補登 Phase2 完了: ${staff.staffNumber} ${staff.staffName}`);
       } catch (error) {
@@ -626,7 +678,7 @@ export class StaffSyncService {
    *  - 事業所設定: 対象事業所を選択
    *  - アカウント情報: ログインID=ACGP+従業員番号, パスワード=Acgp2308!
    */
-  private async phase2_editDetails(page: Page, staff: StaffMasterEntry): Promise<void> {
+  private async phase2_editDetails(page: Page, staff: StaffMasterEntry, validityStartDate?: string): Promise<void> {
     logger.debug(`Phase2 開始: ${staff.staffNumber} ${staff.staffName}`);
 
     // Phase1 登録完了後は /tritrus/staffInfo/staffInfoInsert に遷移している
@@ -702,6 +754,12 @@ export class StaffSyncService {
     // staffInfo ページの「新規追加」→ Thickbox iframe ポップアップ
     // iframe 内: 事業所名検索 → チェック → 「選択する」→ 自動閉じ
     await this.phase2_setOffice(page, staffInfoUrl);
+
+    // === 情報有効期間の修正 ===
+    if (validityStartDate) {
+      await this.ensureStaffInfoPage(page);
+      await this.updateOfficeValidityPeriod(page, validityStartDate);
+    }
 
     // スタッフ情報ページに戻る
     await this.ensureStaffInfoPage(page);
@@ -1347,6 +1405,287 @@ export class StaffSyncService {
       logger.warn('既存スタッフ名の取得に失敗');
       return [];
     }
+  }
+
+  // ============================================================
+  // 既存スタッフへの事業所追加
+  // ============================================================
+
+  /**
+   * TRITRUS スタッフ管理ページで従業員番号を検索し、staffInfo ページに遷移する。
+   *
+   * 検索フォーム: 従業員番号入力 → 検索 → 結果テーブル「選択」→ staffInfo?userId=XXX
+   *
+   * @returns true=staffInfo ページに遷移済み, false=見つからない
+   */
+  /**
+   * @returns { found, alreadyHasOffice } — found=staffInfo に遷移済み, alreadyHasOffice=検索結果で対象事業所が既に表示
+   */
+  async navigateToStaffByEmpNo(page: Page, empNo: string): Promise<{ found: boolean; alreadyHasOffice: boolean }> {
+    await this.navigateToStaffIndex(page);
+
+    // 従業員番号フィールドに入力（id で特定: q_queryEmployeeNo）
+    await page.evaluate((num) => {
+      const lastName = document.getElementById('q_queryUserLastName') as HTMLInputElement;
+      if (lastName) lastName.value = '';
+      const firstName = document.getElementById('q_queryUserFirstName') as HTMLInputElement;
+      if (firstName) firstName.value = '';
+      const empNoInput = document.getElementById('q_queryEmployeeNo') as HTMLInputElement;
+      if (empNoInput) {
+        empNoInput.value = num;
+      } else {
+        const byName = document.querySelector('input[name*="queryEmployeeNo"]') as HTMLInputElement;
+        if (byName) byName.value = num;
+      }
+    }, empNo);
+
+    // 検索実行
+    const searchBtn = await page.$('img[alt*="この条件で検索"]');
+    if (searchBtn) {
+      await searchBtn.click();
+    } else {
+      await page.evaluate(() => {
+        const form = document.querySelector('form') as HTMLFormElement;
+        if (form) form.submit();
+      });
+    }
+    await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+    await this.sleep(2000);
+
+    // 検索結果テーブルから従業員番号が完全一致する行を探す
+    // テーブル行: 従業員番号(td[0]) | フリガナ/氏名(td[1]) | 生年月日(td[2]) | 住所(td[3]) | 事業所名(td[4]) | 選択 | 表示
+    // 事業所名セルに対象事業所が既にある場合、Phase2 をスキップできる
+    const result = await page.evaluate(({ targetEmpNo, officeName }) => {
+      const rows = document.querySelectorAll('table tr');
+      for (const row of Array.from(rows)) {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 5) continue;
+        const empNoCell = cells[0]?.textContent?.trim() || '';
+        if (empNoCell !== targetEmpNo) continue;
+
+        // 事業所名セル（td[4]）に対象事業所が既にあるか
+        const officeCell = cells[4]?.textContent || '';
+        const hasOffice = officeCell.includes(officeName);
+
+        // 選択ボタンをクリック
+        const btn = row.querySelector('input[type="button"][value="選択"]');
+        if (btn) {
+          (btn as HTMLElement).click();
+          return { found: true, alreadyHasOffice: hasOffice, empNo: empNoCell };
+        }
+      }
+      return { found: false, alreadyHasOffice: false };
+    }, { targetEmpNo: empNo, officeName: this.office.name });
+
+    if (!result.found) {
+      logger.warn(`navigateToStaffByEmpNo: 従業員番号 ${empNo} に完全一致する行なし`);
+      return { found: false, alreadyHasOffice: false };
+    }
+
+    if (result.alreadyHasOffice) {
+      logger.info(`navigateToStaffByEmpNo: ${empNo} — ${this.office.name} 既に設定済み（検索結果で確認）`);
+    }
+    logger.debug(`navigateToStaffByEmpNo: 従業員番号 ${result.empNo} の行を選択`);
+
+    await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+    await this.sleep(2000);
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('staffInfo/staffInfo?userId=')) {
+      logger.debug(`navigateToStaffByEmpNo: ${empNo} → ${currentUrl}`);
+      return { found: true, alreadyHasOffice: result.alreadyHasOffice };
+    }
+
+    logger.warn(`navigateToStaffByEmpNo: 遷移先が想定外: ${currentUrl}`);
+    return { found: false, alreadyHasOffice: false };
+  }
+
+  /**
+   * 既存スタッフに事業所を追加 + 情報有効期間修正 + HAM 資格登録。
+   * Phase2(TRITRUS事業所設定) → 有効期間修正 → Phase3(HAM資格) の一連のフローを実行。
+   *
+   * @param empNo 従業員番号
+   * @param staffEntry SmartHR 由来のスタッフ情報（HAM 資格登録に使用）。null なら Phase3 スキップ。
+   * @param validityStartDate 情報有効期間の開始日 "YYYY/MM/DD"。省略時は修正なし。
+   */
+  async addOfficeToStaff(
+    page: Page,
+    empNo: string,
+    staffEntry?: StaffMasterEntry | null,
+    validityStartDate?: string,
+  ): Promise<void> {
+    logger.debug(`addOfficeToStaff: 従業員番号=${empNo}`);
+
+    const navResult = await this.navigateToStaffByEmpNo(page, empNo);
+    if (!navResult.found) {
+      throw new Error(`TRITRUS でスタッフが見つかりません: 従業員番号=${empNo}`);
+    }
+
+    // Phase 2: TRITRUS 事業所追加（検索結果で既にある場合はスキップ）
+    if (!navResult.alreadyHasOffice) {
+      const staffInfoUrl = page.url();
+      await this.phase2_setOffice(page, staffInfoUrl);
+    } else {
+      logger.info(`Phase2 スキップ: ${empNo} — ${this.office.name} 既に設定済み`);
+    }
+
+    // 情報有効期間を修正（事業所の有無に関わらず常にチェック）
+    if (validityStartDate) {
+      await this.ensureStaffInfoPage(page);
+      await this.updateOfficeValidityPeriod(page, validityStartDate);
+    }
+
+    // Phase 3: HAM 資格登録
+    if (staffEntry && staffEntry.qualifications.length > 0) {
+      try {
+        const nav = this.auth.navigator;
+        await this.phase3_registerQualificationsInHam(nav, staffEntry);
+      } catch (error) {
+        logger.warn(`Phase3 HAM 資格登録失敗 (${empNo}): ${(error as Error).message}`);
+      }
+    } else {
+      logger.debug(`Phase3 スキップ: ${empNo} — 資格情報なし`);
+    }
+
+    await this.tryRecoverToStaffIndex(page);
+  }
+
+  /**
+   * 既に staffInfo ページにいる状態で事業所追加 + 有効期間修正 + HAM 資格登録を実行する。
+   */
+  async addOfficeToStaffFromCurrentPage(
+    page: Page,
+    staffInfoUrl: string,
+    staffEntry?: StaffMasterEntry | null,
+    validityStartDate?: string,
+  ): Promise<void> {
+    await this.phase2_setOffice(page, staffInfoUrl);
+
+    if (validityStartDate) {
+      await this.ensureStaffInfoPage(page);
+      await this.updateOfficeValidityPeriod(page, validityStartDate);
+    }
+
+    if (staffEntry && staffEntry.qualifications.length > 0) {
+      try {
+        const nav = this.auth.navigator;
+        await this.phase3_registerQualificationsInHam(nav, staffEntry);
+      } catch (error) {
+        logger.warn(`Phase3 HAM 資格登録失敗 (${staffEntry.staffNumber}): ${(error as Error).message}`);
+      }
+    }
+
+    await this.tryRecoverToStaffIndex(page);
+  }
+
+  /**
+   * 指定スタッフの情報有効期間のみを修正する。
+   *
+   * 新規登録成功後、registerSpecificStaff() とは別経路で
+   * staffInfoEdit に入り、開始月を 2 月へ補正するために使用する。
+   */
+  async updateValidityPeriodForStaff(
+    page: Page,
+    empNo: string,
+    validityStartDate: string,
+  ): Promise<void> {
+    logger.debug(`updateValidityPeriodForStaff: 従業員番号=${empNo}, 開始日=${validityStartDate}`);
+
+    const navResult = await this.navigateToStaffByEmpNo(page, empNo);
+    if (!navResult.found) {
+      throw new Error(`有効期間修正対象が見つかりません: 従業員番号=${empNo}`);
+    }
+
+    await this.ensureStaffInfoPage(page);
+    await this.updateOfficeValidityPeriod(page, validityStartDate);
+    await this.tryRecoverToStaffIndex(page);
+  }
+
+  /**
+   * スタッフ基本情報の情報有効期間の開始月を更新する。
+   *
+   * staffInfo ページの基本情報セクションの「編集」リンク (staffInfoEdit) に遷移し、
+   * 開始月テキストボックス (#dateFromMonth / name=mStaffInfo.dateFromMonth) を変更して
+   * 「更新する」をクリック。
+   *
+   * @param validityStartDate "YYYY/MM/DD" 形式 (例: "2026/02/01")
+   */
+  private async updateOfficeValidityPeriod(page: Page, validityStartDate: string): Promise<void> {
+    const parts = validityStartDate.split('/');
+    const targetMonth = parts[1]; // "02"
+
+    logger.debug(`updateOfficeValidityPeriod: 開始月を ${targetMonth} に変更`);
+
+    // Step 1: ページをリロードして最新 DOM を確保 → staffInfoEdit リンクを取得
+    await page.reload({ waitUntil: 'load', timeout: 15000 }).catch(() => {});
+    await this.sleep(1500);
+
+    const editHref = await page.evaluate(() => {
+      // staffInfoEdit?...&flg=update（基本情報・編集）を探す
+      const links = Array.from(document.querySelectorAll('a[href*="staffInfoEdit"][href*="flg=update"]'));
+      if (links.length > 0) return links[0].getAttribute('href');
+      return null;
+    });
+
+    if (!editHref) {
+      logger.warn('updateOfficeValidityPeriod: staffInfoEdit リンクが見つかりません — スキップ');
+      return;
+    }
+
+    // Step 2: スタッフ基本情報・編集ページへ遷移
+    const editUrl = new URL(editHref, page.url()).href;
+    logger.debug(`updateOfficeValidityPeriod: ${editUrl}`);
+    await page.goto(editUrl, { waitUntil: 'load', timeout: 15000 }).catch(() => {});
+    await this.sleep(1500);
+
+    // Step 3: 現在の開始月を確認（#dateFromMonth = mStaffInfo.dateFromMonth）
+    const currentMonth = await page.evaluate(() => {
+      const el = document.getElementById('dateFromMonth') as HTMLInputElement;
+      return el?.value || '';
+    });
+
+    const targetMonthNum = parseInt(targetMonth, 10);
+    const currentMonthNum = parseInt(currentMonth, 10);
+    logger.debug(`updateOfficeValidityPeriod: 現在=${currentMonthNum}月, 目標=${targetMonthNum}月`);
+
+    if (!currentMonth || currentMonthNum <= targetMonthNum) {
+      logger.info(`updateOfficeValidityPeriod: 開始月は既に ${currentMonth || '?'} 月 — 変更不要`);
+      // staffInfo ページに戻る
+      const backLink = await page.$('a[href*="staffInfo?userId="]');
+      if (backLink) await backLink.click();
+      else await page.goBack();
+      await this.sleep(1000);
+      return;
+    }
+
+    // Step 4: 開始月を変更
+    await page.evaluate((month) => {
+      const el = document.getElementById('dateFromMonth') as HTMLInputElement;
+      if (el) el.value = month;
+    }, String(targetMonthNum));
+    logger.debug(`updateOfficeValidityPeriod: dateFromMonth = ${targetMonthNum}`);
+
+    // Step 5: 「更新する」クリック（datacheck('staffInfo')）
+    page.once('dialog', async (dialog) => {
+      logger.debug(`updateOfficeValidityPeriod ダイアログ: ${dialog.message()}`);
+      await dialog.accept();
+    });
+
+    const updateLink = await page.$('a[onclick*="datacheck"]');
+    if (updateLink) {
+      await updateLink.click();
+    } else {
+      await page.evaluate(() => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const win = window as any;
+        if (typeof win.datacheck === 'function') win.datacheck('staffInfo');
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+      });
+    }
+
+    await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+    await this.sleep(1500);
+    logger.info(`updateOfficeValidityPeriod: 情報有効期間の開始月を ${targetMonthNum} 月に更新`);
   }
 
   /**

@@ -1,0 +1,360 @@
+=== 実データ転記テスト（姶良） ===
+
+Step 0: Google Sheets データ取得...
+  全レコード数: 722
+  転記対象: 717件
+
+  処理レコード (row=7):
+    記録者: 冨迫広美 (1614)
+    利用者: 有田勉 (aozoraID=6641)
+    2026-02-01 08:00-08:30
+    医療 / 通常（定期）
+    → 訪問看護基本療養費（Ⅰ・Ⅱ） (showflag=3, 93#1001)
+    HAM: date=20260201 month=20260201 time=60 period=1
+
+--- ブラウザ起動 ---
+ログイン中...
+TRITRUS ログイン開始...
+TRITRUS ポータル表示: https://bi.kanamic.net/josso/signon/login.do?josso_back_to=https://portal.kanamic.net/tritrus/josso_security_check
+ログイン完了: https://portal.kanamic.net/tritrus/index/
+HAMリンク未検出。訪問看護フィルタを適用...
+HAMリンク: "訪問看護ステーションあおぞら姶良" target="new_win_1"
+新タブ: https://portal.kanamic.net/tritrusutil/goCicHam.jsp?c=554128&h=400021814&k=6
+HAMリダイレクト完了: https://www2.kanamic.net/kanamic/ham/hamfromout.go
+HAM ページ確認: https://www2.kanamic.net/kanamic/ham/hamfromout.go
+HAM フレーム数: 6
+  frame: name="" url="https://www2.kanamic.net/kanamic/ham/hamfromout.go"
+  frame: name="kanamicmain" url="https://www2.kanamic.net/kanamic/ham/t1-2Action.go"
+  frame: name="commontarget" url="https://www2.kanamic.net/kanamic/jsp/default/ham/commontarget.jsp"
+  frame: name="topFrame" url="https://www2.kanamic.net/kanamic/jsp/default/ham/top/t1-2_top.jsp?uni=4514527AF84538AAFB22B8675ED9A8CC1772104265092"
+  frame: name="mainFrame" url="https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=t1-2&uni=4514527AF84538AAFB22B8675ED9A8CC1772104265092"
+  frame: name="" url="https://www2.kanamic.net/kanamic/ham/tnews_PPInfoAction.go?doAction=tnews_PPInfo&pageID=t1-2&newsid=13088"
+TRITRUS → HAM ログイン完了
+  ✅ ログイン成功
+
+Step 1-2: 業務ガイド → 利用者検索...
+訪問看護業務ガイドに遷移
+利用者検索に遷移
+  pageId: k2_1
+
+  --- k2_1 利用者検索 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_1&uni=4514527AF84) ---
+    SELECT name="searchdate" id="" opts=[20260801="2026年08月", 20260701="2026年07月", 20260601="2026年06月", 20260501="2026年05月", 20260401="2026年04月"... (79)]
+    SELECT name="searchUsergroup" id="" opts=[="全グループ"]
+    SELECT name="searchkind" id="" opts=[1="50音順", 30="本日訪問看護サービス予定のある人", 31="明日訪問看護サービス予定のある人", 32="昨日訪問看護サービス予定のあった人", 5="認定有効期間今月で終了する"... (27)]
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_search_word" id="" value="検索"
+    INPUT type="button" name="act_printschedule" id="" value="PDF表示"
+    INPUT type="button" name="act_print" id="" value="PDF表示"
+    INPUT type="button" name="act_helperas" id="" value="PDF表示"
+    INPUT type="button" name="act_covid" id="" value="CSV出力"
+    HIDDEN name="pageID" value="k2_1"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="0"
+    HIDDEN name="saveSearchkaigoStopreason" value="0"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value=""
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value=""
+    HIDDEN name="saveSearchTais" value=""
+    HIDDEN name="saveSearchGoodsCode" value=""
+    HIDDEN name="saveSearchShopname" value=""
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    HIDDEN name="keyword" value=""
+    HIDDEN name="careuserid" value=""
+    HIDDEN name="servicedate" value="20260201"
+    HIDDEN name="searchFlag" value="0"
+    HIDDEN name="saveUsergroup" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 登録者条件検索 | （左下の表から頭文字検索を行うと、条件選択は無効になります） | 現在の登録者102人 | 年月選択  | 2026年08月 | 2026年07月 | 2026年06月 | 2026年05月 | 2026年04月 | 2026年03月 | 2026年02月 | 2026年01月 | 2025年12月 | 2025年11月 | 2025年10月 | 2025年09月 | 2025年08月 | 2025年07月 | 2025年06月 | 2025年05月 | 2025年04月 | 2025年03月 | 2025年02
+
+Step 3: 年月設定 & 検索 (monthStart=20260201)...
+  ✅ 検索完了
+
+Step 4: 患者「有田勉」検索...
+  ✅ 患者ID: 8876534
+  ✅ k2_2 月間スケジュール
+
+Step 5: 追加 (date=20260201)...
+  ✅ k2_3 (pageId=k2_3)
+
+  --- k2_3 スケジュール追加 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_3&uni=4514527AF84) ---
+    SELECT name="editdate" id="" opts=[20260201="01", 20260202="02", 20260203="03", 20260204="04", 20260205="05"... (28)]
+    SELECT name="starttype" id="" opts=[1="昼間", 2="夜朝", 3="深夜", 0="指定なし"]
+    SELECT name="starttime0" id="" opts=[="--", 08="08", 09="09", 10="10", 11="11"... (11)]
+    SELECT name="starttime1" id="" opts=[00="00", 01="01", 02="02", 03="03", 04="04"... (60)]
+    SELECT name="timetype" id="" opts=[0="--", 20="20分未満", 21="20分", 30="30分未満", 60="1時間未満"... (7)]
+    SELECT name="endtype" id="" opts=[1="昼間", 2="夜朝", 3="深夜", 0="指定なし"]
+    SELECT name="endtime0" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (31)]
+    SELECT name="endtime1" id="" opts=[00="00", 01="01", 02="02", 03="03", 04="04"... (60)]
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    HIDDEN name="pageID" value="k2_3"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="1"
+    HIDDEN name="saveSearchkaigoStopreason" value="No getter method for property saveSearchkaigoStopreason of b"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value="act_search"
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value="No getter method for property saveSearchGoodsname of bean or"
+    HIDDEN name="saveSearchTais" value="No getter method for property saveSearchTais of bean org.apa"
+    HIDDEN name="saveSearchGoodsCode" value="No getter method for property saveSearchGoodsCode of bean or"
+    HIDDEN name="saveSearchShopname" value="No getter method for property saveSearchShopname of bean org"
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 2026年02月  | 01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 |  日 利用者スケジュール追加 |  |  |  | 本日のサービス予定 | 時間	スタッフ名	サービス種類 | 	 	 | 追加提供時間 |  | 開始時間	 | 昼間 | 夜朝 | 深夜 | 指定なし |   | -- | 08 |
+
+Step 6: 時間設定 08:00-08:30 (type=60)...
+  k2_3 selects:
+    editdate: [20260201,20260202,20260203,20260204,20260205,20260206,20260207,20260208...(28)] current="20260201"
+    starttype: [1,2,3,0] current="1"
+    starttime0: [,08,09,10,11,12,13,14...(11)] current=""
+    starttime1: [00,01,02,03,04,05,06,07...(60)] current="00"
+    timetype: [0,20,21,30,60,90,91] current="0"
+    endtype: [1,2,3,0] current="0"
+    endtime0: [,00,01,02,03,04,05,06...(31)] current=""
+    endtime1: [00,01,02,03,04,05,06,07...(60)] current="00"
+  設定値: starttype=1 start=08:00 timetype=60 endtype=1 end=08:30
+  starttype は既に 1 (変更不要)
+  starttime0 利用可能時間: [08,09,10,11,12,13,14,15,16,17]
+  設定結果: starttype=1 starttime0=08 starttime1=00 timetype=60 endtype=1 endtime0=08 endtime1=30
+  ✅ k2_3a (pageId=k2_3a)
+
+  --- k2_3a サービスコード（初期） (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_3a&uni=4514527AF8) ---
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    INPUT type="button" name="change_flag" id="" value="訪問看護"
+    INPUT type="button" name="change_flag" id="" value="予防訪問看護"
+    INPUT type="button" name="change_flag" id="" value="訪問看護療養費"
+    INPUT type="radio" name="searchKbn" id="" value="1"
+    INPUT type="radio" name="searchKbn" id="" value="2"
+    INPUT type="radio" name="searchKbn" id="" value="3"
+    INPUT type="radio" name="searchKbn" id="" value="4"
+    INPUT type="radio" name="searchKbn" id="" value="5"
+    INPUT type="radio" name="searchKbn" id="" value="6"
+    INPUT type="radio" name="searchKbn" id="" value="99"
+    INPUT type="checkbox" name="flag2" id="" value="1"
+    INPUT type="checkbox" name="longcareflag" id="" value="1"
+    INPUT type="checkbox" name="infantcareflag" id="" value="1"
+    INPUT type="checkbox" name="pluralnurseflag1" id="" value="1"
+    INPUT type="checkbox" name="pluralnurseflag2" id="" value="1"
+    INPUT type="button" name="" id="" value="検索"
+    INPUT type="radio" name="radio" id="" value="93#1001"
+    INPUT type="radio" name="radio" id="" value="93#1225"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    INPUT type="button" name="change_flag" id="" value="訪問看護"
+    INPUT type="button" name="change_flag" id="" value="予防訪問看護"
+    INPUT type="button" name="change_flag" id="" value="訪問看護療養費"
+    HIDDEN name="pageID" value="k2_3a"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="1"
+    HIDDEN name="saveSearchkaigoStopreason" value="No getter method for property saveSearchkaigoStopreason of b"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value="act_search"
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value="No getter method for property saveSearchGoodsname of bean or"
+    HIDDEN name="saveSearchTais" value="No getter method for property saveSearchTais of bean org.apa"
+    HIDDEN name="saveSearchGoodsCode" value="No getter method for property saveSearchGoodsCode of bean or"
+    HIDDEN name="saveSearchShopname" value="No getter method for property saveSearchShopname of bean org"
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    HIDDEN name="editdate" value="20260201"
+    HIDDEN name="showdate" value="2026年02月01日"
+    HIDDEN name="starttype" value="1"
+    HIDDEN name="endtype" value="1"
+    HIDDEN name="starttime0" value="08"
+    HIDDEN name="starttime1" value="00"
+    HIDDEN name="endtime0" value="08"
+    HIDDEN name="endtime1" value="30"
+    HIDDEN name="servicename" value=""
+    HIDDEN name="serviceitem" value=""
+    HIDDEN name="servicetype" value=""
+    HIDDEN name="showflag" value="3"
+    HIDDEN name="timetype" value="60"
+    HIDDEN name="teikiAfter2404" value="0"
+    HIDDEN name="servicepoint" value=""
+    HIDDEN name="93#1001" value="0"
+    HIDDEN name="93#1225" value="0"
+    HIDDEN name="radio" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 2026年02月01日分スケジュール追加 | 提供時間	08:00 ～ 08:30 | 認定情報	未認定申請中 |  |  | 			 | サービスコード検索:	看護師等 准看護師 理学療法士等 悪性腫瘍または褥瘡専門 一時的外泊 緊急加算のみ すべて | 緊急 長時間 乳幼児 複数名訪問 複数名訪問(二) |  |  	サービス種類 | 	訪問看護基本療養費（Ⅰ・Ⅱ） | 	精神科訪問看護基本療養費（Ⅰ・Ⅲ） | 			
+
+Step 7: showflag=3 切替...
+
+  --- k2_3a 保険切替後 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_3a&uni=4514527AF8) ---
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    INPUT type="button" name="change_flag" id="" value="訪問看護"
+    INPUT type="button" name="change_flag" id="" value="予防訪問看護"
+    INPUT type="button" name="change_flag" id="" value="訪問看護療養費"
+    INPUT type="radio" name="searchKbn" id="" value="1"
+    INPUT type="radio" name="searchKbn" id="" value="2"
+    INPUT type="radio" name="searchKbn" id="" value="3"
+    INPUT type="radio" name="searchKbn" id="" value="4"
+    INPUT type="radio" name="searchKbn" id="" value="5"
+    INPUT type="radio" name="searchKbn" id="" value="6"
+    INPUT type="radio" name="searchKbn" id="" value="99"
+    INPUT type="checkbox" name="flag2" id="" value="1"
+    INPUT type="checkbox" name="longcareflag" id="" value="1"
+    INPUT type="checkbox" name="infantcareflag" id="" value="1"
+    INPUT type="checkbox" name="pluralnurseflag1" id="" value="1"
+    INPUT type="checkbox" name="pluralnurseflag2" id="" value="1"
+    INPUT type="button" name="" id="" value="検索"
+    INPUT type="radio" name="radio" id="" value="93#1001"
+    INPUT type="radio" name="radio" id="" value="93#1225"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    INPUT type="button" name="change_flag" id="" value="訪問看護"
+    INPUT type="button" name="change_flag" id="" value="予防訪問看護"
+    INPUT type="button" name="change_flag" id="" value="訪問看護療養費"
+    HIDDEN name="pageID" value="k2_3a"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="1"
+    HIDDEN name="saveSearchkaigoStopreason" value="No getter method for property saveSearchkaigoStopreason of b"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value="act_search"
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value="No getter method for property saveSearchGoodsname of bean or"
+    HIDDEN name="saveSearchTais" value="No getter method for property saveSearchTais of bean org.apa"
+    HIDDEN name="saveSearchGoodsCode" value="No getter method for property saveSearchGoodsCode of bean or"
+    HIDDEN name="saveSearchShopname" value="No getter method for property saveSearchShopname of bean org"
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    HIDDEN name="editdate" value="20260201"
+    HIDDEN name="showdate" value="2026年02月01日"
+    HIDDEN name="starttype" value="1"
+    HIDDEN name="endtype" value="1"
+    HIDDEN name="starttime0" value="08"
+    HIDDEN name="starttime1" value="00"
+    HIDDEN name="endtime0" value="08"
+    HIDDEN name="endtime1" value="30"
+    HIDDEN name="servicename" value=""
+    HIDDEN name="serviceitem" value=""
+    HIDDEN name="servicetype" value=""
+    HIDDEN name="showflag" value="3"
+    HIDDEN name="timetype" value="60"
+    HIDDEN name="teikiAfter2404" value="0"
+    HIDDEN name="servicepoint" value=""
+    HIDDEN name="93#1001" value="0"
+    HIDDEN name="93#1225" value="0"
+    HIDDEN name="radio" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 2026年02月01日分スケジュール追加 | 提供時間	08:00 ～ 08:30 | 認定情報	未認定申請中 |  |  | 			 | サービスコード検索:	看護師等 准看護師 理学療法士等 悪性腫瘍または褥瘡専門 一時的外泊 緊急加算のみ すべて | 緊急 長時間 乳幼児 複数名訪問 複数名訪問(二) |  |  	サービス種類 | 	訪問看護基本療養費（Ⅰ・Ⅱ） | 	精神科訪問看護基本療養費（Ⅰ・Ⅲ） | 			
+  サービスコード (3):
+    93#1001 → 訪問看護基本療養費（Ⅰ・Ⅱ） ★選択
+    93#1225 → 精神科訪問看護基本療養費（Ⅰ・Ⅲ）
+     → 
+selectServiceCode: 93#1001 (exact)
+  ✅ コード選択: 93#1001 (pattern="訪問看護基本療養費")
+  ✅ k2_3b 確認
+
+Step 8: 決定 → k2_2...
+  ✅ k2_2 に戻った
+
+Step 9: 配置ボタン → k2_2f...
+  assignId: 136 (day+unassigned)
+  行: 1日 日 08:00 ～ 08:30 訪問看護基本療養費（Ⅰ・Ⅱ） showflag = false; 1
+  ✅ k2_2f スタッフ配置
+
+  --- k2_2f スタッフ配置 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_2f&uni=4514527AF8) ---
+    SELECT name="newstarthour" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (31)]
+    SELECT name="newstartminute" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (61)]
+    SELECT name="newendhour" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (31)]
+    SELECT name="newendminute" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (61)]
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_addnew" id="" value="スタッフ追加"
+    INPUT type="checkbox" name="mainFlag" id="" value="1"
+    INPUT type="checkbox" name="mainFlag" id="" value="0"
+    INPUT type="button" name="act_select" id="" value="配置"
+    INPUT type="button" name="act_delete" id="" value="削除"
+    HIDDEN name="pageID" value="k2_2f"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="1"
+    HIDDEN name="saveSearchkaigoStopreason" value="No getter method for property saveSearchkaigoStopreason of b"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value="act_search"
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value="No getter method for property saveSearchGoodsname of bean or"
+    HIDDEN name="saveSearchTais" value="No getter method for property saveSearchTais of bean org.apa"
+    HIDDEN name="saveSearchGoodsCode" value="No getter method for property saveSearchGoodsCode of bean or"
+    HIDDEN name="saveSearchShopname" value="No getter method for property saveSearchShopname of bean org"
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    HIDDEN name="editdate" value="20260201"
+    HIDDEN name="updatedate" value="20260201"
+    HIDDEN name="assignid" value="136"
+    HIDDEN name="seq" value="0"
+    HIDDEN name="starttime" value=""
+    HIDDEN name="endtime" value=""
+    HIDDEN name="showflag" value="1"
+    HIDDEN name="index" value="0"
+    HIDDEN name="helperid" value=""
+    HIDDEN name="showLicence" value="1"
+    HIDDEN name="jobtype" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 2026年02月01日分のスタッフ配置 | サービス時間	08:00 ～ 08:30 | サービス種類	訪問看護基本療養費（Ⅰ・Ⅱ） |  |  | 勤怠開始時間	勤怠終了時間	スタッフ	職種	主担当?	スタッフ配置	削除 |  | -- | 00 | 01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 翌日00 | 翌日01 | 翌日02 | 翌日03 |
+
+Step 10: スタッフ「冨迫広美」配置...
+  Stage 1: k2_2f の配置ボタンを Playwright click...
+  ✅ 配置ボタン click 完了
+  ✅ 従業員リスト検出 (frame="mainFrame")
+  Stage 2: 従業員リストから「冨迫広美」を検索...
+  choice結果: {
+  "found": true,
+  "method": "choice()",
+  "helperId": "998223814",
+  "staffName": "冨迫 広美",
+  "empNo": "1614"
+}
+  確認画面の決定ボタンを検索...
+  ✅ 確認画面の決定ボタンクリック (frame="mainFrame")
+  ✅ スタッフ配置完了: 冨迫 広美 (helperId=998223814)
+
+Step 10.5: k2_2f で戻る → k2_2 へ...
+  ⚠️ 戻るリンク未検出。act_back にフォールバック
+  ✅ k2_2 に戻った
+
+Step 11: 全1ボタン（実績=1）+ 上書き保存...
+  ✅ 全1ボタンクリック
+  上書き保存...
+  ✅ 上書き保存完了
+  ✅ 保存検証OK
+
+Step 14: Sheets ステータス更新...
+転記ステータス更新: row=7, status=転記済み
+  ✅ row=7 → 転記済み
+メインメニューに遷移
+
+=== 転記テスト完了 ===
+10秒後にブラウザを閉じます...
+ブラウザ終了

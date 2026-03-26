@@ -2,6 +2,7 @@ import { Page, BrowserContext } from 'playwright';
 import { logger } from '../core/logger';
 import { HamNavigator } from '../core/ham-navigator';
 import { withRetry } from '../core/retry-manager';
+import type { BrowserManager } from '../core/browser-manager';
 
 export interface KanamickAuthConfig {
   /** TRITRUS ポータル URL (e.g. https://portal.kanamic.net/tritrus/index/) */
@@ -40,15 +41,36 @@ export class KanamickAuthService {
   private context: BrowserContext | null = null;
   private _navigator: HamNavigator | null = null;
   private isLoggedIn = false;
+  private browserManager: BrowserManager | null = null;
 
   constructor(config: KanamickAuthConfig) {
     this.config = config;
   }
 
   /** BrowserContext を設定（launch 後に呼ぶ） */
-  setContext(context: BrowserContext): void {
+  setContext(context: BrowserContext, browserManager?: BrowserManager): void {
     this.context = context;
     this._navigator = new HamNavigator(context);
+    if (browserManager) {
+      this.browserManager = browserManager;
+    }
+  }
+
+  /**
+   * BrowserContext が死んでいる場合、BrowserManager 経由でブラウザを再起動し
+   * context / navigator を更新する。
+   * @returns true if relaunch was performed
+   */
+  private async relaunchIfContextDead(): Promise<boolean> {
+    if (!this.browserManager) return false;
+    if (this.browserManager.isContextAlive()) return false;
+
+    logger.warn('BrowserContext 死亡を検出 — ブラウザを再起動します');
+    await this.browserManager.relaunch();
+    this.context = this.browserManager.browserContext;
+    this._navigator = new HamNavigator(this.context);
+    this.isLoggedIn = false;
+    return true;
   }
 
   get navigator(): HamNavigator {
@@ -63,14 +85,27 @@ export class KanamickAuthService {
     return pages[0];
   }
 
-  /** ページがなければ作成 */
+  /** ページがなければ作成。コンテキスト死亡時は自動再起動 */
   private async ensurePage(): Promise<Page> {
     if (!this.context) throw new Error('BrowserContext が未設定です');
-    const pages = this.context.pages();
-    if (pages.length === 0) {
+
+    try {
+      const pages = this.context.pages();
+      if (pages.length > 0) return pages[0];
       return await this.context.newPage();
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes('has been closed') || msg.includes('Target closed')) {
+        // BrowserContext 自体が死んでいる → 再起動を試行
+        const relaunched = await this.relaunchIfContextDead();
+        if (relaunched && this.context) {
+          const pages = this.context.pages();
+          if (pages.length > 0) return pages[0];
+          return await this.context.newPage();
+        }
+      }
+      throw err;
     }
-    return pages[0];
   }
 
   /**
@@ -87,7 +122,8 @@ export class KanamickAuthService {
         logger.info('TRITRUS ログイン開始（ポータルのみ）...');
         const page = await this.ensurePage();
 
-        await page.goto(this.config.url, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.goto(this.config.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
         logger.debug(`TRITRUS ポータル表示: ${page.url()}`);
 
         const isAlreadyOnPortal = page.url().includes('portal.kanamic.net/tritrus/index');
@@ -97,7 +133,7 @@ export class KanamickAuthService {
           await page.fill('#josso_username', this.config.username);
           await page.fill('#josso_password', this.config.password);
           await page.click('input.submit-button[type="button"]');
-          await page.waitForLoadState('networkidle', { timeout: 15000 });
+          await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
           await this.sleep(2000);
           logger.debug(`ログイン完了: ${page.url()}`);
         }
@@ -130,7 +166,9 @@ export class KanamickAuthService {
 
         // === Step 1: JOSSO SSO ログイン ===
         // TRITRUS ポータルは bi.kanamic.net/josso にリダイレクトする
-        await page.goto(this.config.url, { waitUntil: 'networkidle', timeout: 30000 });
+        // networkidle はページが重い場合にクラッシュするため domcontentloaded を使用
+        await page.goto(this.config.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
         logger.debug(`TRITRUS ポータル表示: ${page.url()}`);
 
         // リトライ時、既にポータルにログイン済みならログインをスキップ
@@ -142,7 +180,7 @@ export class KanamickAuthService {
           await page.fill('#josso_username', this.config.username);
           await page.fill('#josso_password', this.config.password);
           await page.click('input.submit-button[type="button"]');
-          await page.waitForLoadState('networkidle', { timeout: 15000 });
+          await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
           await this.sleep(2000);
           logger.debug(`ログイン完了: ${page.url()}`);
         }
@@ -170,7 +208,7 @@ export class KanamickAuthService {
           const searchBtn = await page.$('button.btn-search');
           if (searchBtn) {
             await searchBtn.click();
-            await page.waitForLoadState('networkidle', { timeout: 30000 });
+            await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
             await this.sleep(2000);
           }
           hamLink = hParam
@@ -258,6 +296,9 @@ export class KanamickAuthService {
    * セッションが有効かチェック。無効なら再ログイン
    */
   async ensureLoggedIn(): Promise<HamNavigator> {
+    // BrowserContext が死んでいる場合は再起動してから再ログイン
+    await this.relaunchIfContextDead();
+
     if (!this.isLoggedIn) {
       return this.login();
     }
@@ -270,6 +311,40 @@ export class KanamickAuthService {
         logger.info('HAM セッション期限切れ、再ログイン...');
         this.isLoggedIn = false;
         return this.login();
+      }
+
+      // HAM フレームが chrome-error:// の場合はサーバー接続断 → 再ログイン
+      const frames = hamPage.frames();
+      const hasErrorFrame = frames.some(f => f.url().startsWith('chrome-error://'));
+      if (hasErrorFrame) {
+        logger.warn('HAM フレームに chrome-error:// を検出 — サーバー接続断、再ログイン...');
+        this.isLoggedIn = false;
+        return this.login();
+      }
+
+      // HAM サーバー側エラー（メモリ不足、ページ開けない等）を検出
+      // 長時間セッションで HAM がリソース不足になった場合に発生する
+      const pageContent = await hamPage.evaluate(() => document.body?.innerText || '').catch(() => '');
+      const hamServerError = ['メモリ不足', '開けません', 'サーバーエラー', '一時的に利用できません',
+        'E00010', '502 Bad Gateway', '503 Service', 'Internal Server Error'];
+      const detectedError = hamServerError.find(keyword => pageContent.includes(keyword));
+      if (detectedError) {
+        logger.warn(`HAM サーバーエラー検出: "${detectedError}" — ページリロード後に再ログイン...`);
+        // HAM ページをリロードしてサーバー側のエラー状態をクリア
+        await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        this.isLoggedIn = false;
+        return this.login();
+      }
+
+      // フレーム内の syserror/エラーページも検出
+      for (const frame of frames) {
+        const frameUrl = frame.url();
+        if (frameUrl.includes('syserror') || frameUrl.includes('error/')) {
+          logger.warn(`HAM フレームにエラーページ検出: ${frameUrl} — ページリロード後に再ログイン...`);
+          await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          this.isLoggedIn = false;
+          return this.login();
+        }
       }
     } catch {
       logger.info('HAM ページアクセスエラー、再ログイン...');
@@ -345,68 +420,39 @@ export class KanamickAuthService {
    */
   async navigateToMainMenu(): Promise<void> {
     const nav = this.navigator;
-    const MAX_BACK_STEPS = 8;
-    let prevPageId = '';
 
-    for (let i = 0; i < MAX_BACK_STEPS; i++) {
-      const pageId = await nav.getCurrentPageId();
-      logger.debug(`navigateToMainMenu: step ${i + 1}, pageId=${pageId}`);
-
-      // t1-2 = メインメニュー到達
-      if (pageId === 't1-2') {
-        logger.debug('メインメニューに遷移完了');
-        return;
-      }
-
-      // pageId が取得できない場合（syserror 等）はフレーム URL で判定
-      if (!pageId) {
-        try {
-          const frame = await nav.getMainFrame();
-          const url = frame.url();
-          if (url.includes('t1-2') || url.includes('hamfromout')) {
-            logger.debug('メインメニューに遷移完了（URL判定）');
-            return;
-          }
-        } catch {
-          // フレームアクセス失敗 — 続行
-        }
-      }
-
-      // k2_1, k1_1 は act_back が効かないため、topFrame の「総合メニューへ」で直接戻る
-      if (pageId === 'k2_1' || pageId === 'k1_1' || (pageId && pageId === prevPageId)) {
-        logger.debug(`navigateToMainMenu: ${pageId} → topFrame 総合メニューへ`);
-        const clicked = await this.clickMainMenuLink(nav);
-        if (clicked) {
-          await this.sleep(2000);
-          prevPageId = pageId || '';
-          continue;
-        }
-      }
-
-      prevPageId = pageId || '';
-
-      try {
-        await nav.submitForm({ action: 'act_back' });
-        await this.sleep(1500);
-      } catch (err) {
-        logger.warn(`navigateToMainMenu: act_back 失敗 (step ${i + 1}): ${(err as Error).message}`);
-        // act_back 失敗時は topFrame 総合メニューへを試行
-        await this.clickMainMenuLink(nav);
-        await this.sleep(1500);
-      }
-    }
-
-    // 到達確認 — 未到達の場合は kanamicmain フレームを直接リロードして強制復帰
-    const finalPageId = await nav.getCurrentPageId();
-    if (finalPageId && finalPageId !== 't1-2') {
-      logger.warn(`navigateToMainMenu: ${MAX_BACK_STEPS}回後も t1-2 に到達せず (pageId=${finalPageId})。強制復帰を試行`);
-      await this.forceNavigateToMainMenu(nav);
-    } else if (!finalPageId) {
-      logger.warn('navigateToMainMenu: pageId 取得不可。強制復帰を試行');
-      await this.forceNavigateToMainMenu(nav);
-    } else {
+    // まず現在位置を確認
+    const pageId = await nav.getCurrentPageId();
+    if (pageId === 't1-2') {
       logger.debug('メインメニューに遷移完了');
+      return;
     }
+
+    // pageId 取得可能なら act_back / 総合メニューへ を1回だけ試行
+    if (pageId) {
+      try {
+        if (pageId === 'k2_1' || pageId === 'k1_1') {
+          // k2_1, k1_1 は act_back が効かないため topFrame「総合メニューへ」
+          const clicked = await this.clickMainMenuLink(nav);
+          if (clicked) {
+            await this.sleep(2000);
+            const after = await nav.getCurrentPageId();
+            if (after === 't1-2') { logger.debug('メインメニューに遷移完了'); return; }
+          }
+        } else {
+          await nav.submitForm({ action: 'act_back' });
+          await this.sleep(1500);
+          const after = await nav.getCurrentPageId();
+          if (after === 't1-2') { logger.debug('メインメニューに遷移完了'); return; }
+        }
+      } catch (err) {
+        logger.warn(`navigateToMainMenu: 通常復帰失敗: ${(err as Error).message}`);
+      }
+    }
+
+    // 通常復帰で到達できなかった → 強制復帰（フレーム直接書き換え / リロード / 再ログイン）
+    logger.warn(`navigateToMainMenu: 通常復帰失敗 (pageId=${pageId}) → 強制復帰へ`);
+    await this.forceNavigateToMainMenu(nav);
   }
 
   /**
@@ -418,42 +464,110 @@ export class KanamickAuthService {
       const hamPage = nav.hamPage;
 
       // 方法1: kanamicmain フレームの URL を t1-2Action.go に直接書き換え
-      const kanamicmain = hamPage.frame('kanamicmain');
-      if (kanamicmain) {
-        const currentUrl = kanamicmain.url();
-        // t1-2Action.go の URL を構築（既存 URL のベースを利用）
-        const baseMatch = currentUrl.match(/(https?:\/\/[^/]+\/kanamic\/)/);
-        if (baseMatch) {
-          const t12Url = `${baseMatch[1]}ham/t1-2Action.go`;
-          logger.debug(`forceNavigateToMainMenu: kanamicmain → ${t12Url}`);
-          await hamPage.evaluate((url) => {
-            const frame = document.querySelector('frame[name="kanamicmain"]') as HTMLFrameElement;
-            if (frame) frame.src = url;
-          }, t12Url);
-          await this.sleep(3000);
-          await hamPage.waitForLoadState('load').catch(() => {});
-          const pageId = await nav.getCurrentPageId();
-          if (pageId === 't1-2') {
-            logger.info('forceNavigateToMainMenu: 強制復帰成功');
-            return;
+      try {
+        const kanamicmain = hamPage.frame('kanamicmain');
+        if (kanamicmain) {
+          const currentUrl = kanamicmain.url();
+          const baseMatch = currentUrl.match(/(https?:\/\/[^/]+\/kanamic\/)/);
+          if (baseMatch) {
+            const t12Url = `${baseMatch[1]}ham/t1-2Action.go`;
+            logger.debug(`forceNavigateToMainMenu: kanamicmain → ${t12Url}`);
+            await hamPage.evaluate((url) => {
+              const frame = document.querySelector('frame[name="kanamicmain"]') as HTMLFrameElement;
+              if (frame) frame.src = url;
+            }, t12Url);
+            await this.sleep(3000);
+            await hamPage.waitForLoadState('load').catch(() => {});
+            const pageId = await nav.getCurrentPageId();
+            if (pageId === 't1-2') {
+              logger.info('forceNavigateToMainMenu: 強制復帰成功');
+              return;
+            }
           }
         }
+      } catch (e1) {
+        logger.warn(`forceNavigateToMainMenu: 方法1 失敗: ${(e1 as Error).message}`);
       }
 
       // 方法2: HAM ページ自体をリロード（hamfromout.go → 自動的に t1-2）
-      logger.debug('forceNavigateToMainMenu: HAM ページリロード');
-      await hamPage.reload({ waitUntil: 'load', timeout: 30000 });
-      await this.sleep(3000);
-      await nav.closeVenoboxPopup();
-      const pageId = await nav.getCurrentPageId();
-      if (pageId === 't1-2') {
-        logger.info('forceNavigateToMainMenu: リロードで復帰成功');
-        return;
+      try {
+        logger.debug('forceNavigateToMainMenu: HAM ページリロード');
+        await hamPage.reload({ waitUntil: 'load', timeout: 30000 });
+        await this.sleep(3000);
+        await nav.closeVenoboxPopup();
+        const pageId = await nav.getCurrentPageId();
+        if (pageId === 't1-2') {
+          logger.info('forceNavigateToMainMenu: リロードで復帰成功');
+          return;
+        }
+      } catch (e2) {
+        logger.warn(`forceNavigateToMainMenu: 方法2(リロード) 失敗: ${(e2 as Error).message}`);
       }
 
-      logger.error('forceNavigateToMainMenu: 強制復帰失敗');
+      // 方法3: ページが完全にクラッシュしている場合、HAM URL に直接ナビゲート
+      try {
+        const hamUrl = hamPage.url();
+        logger.warn(`forceNavigateToMainMenu: 方法3 — HAM ページに再ナビゲート (${hamUrl})`);
+        await hamPage.goto(hamUrl, { waitUntil: 'load', timeout: 30000 });
+        await this.sleep(3000);
+        await nav.closeVenoboxPopup();
+        const pageId = await nav.getCurrentPageId();
+        if (pageId === 't1-2') {
+          logger.info('forceNavigateToMainMenu: 再ナビゲートで復帰成功');
+          return;
+        }
+      } catch (e3) {
+        logger.warn(`forceNavigateToMainMenu: 方法3(再ナビゲート) 失敗: ${(e3 as Error).message}`);
+      }
+
+      // 方法4: 完全再ログイン（最終手段）
+      // まず BrowserContext 死亡を検出 → ブラウザ再起動
+      const relaunched = await this.relaunchIfContextDead();
+      if (relaunched) {
+        logger.info('forceNavigateToMainMenu: ブラウザ再起動済み — 再ログインへ');
+      }
+
+      // ERR_CONNECTION_RESET の場合、サーバー復旧を待つためにバックオフ付きリトライ
+      const MAX_RELOGIN_ATTEMPTS = 3;
+      for (let attempt = 1; attempt <= MAX_RELOGIN_ATTEMPTS; attempt++) {
+        const backoffSec = attempt * 10; // 10s, 20s, 30s
+        logger.error(`forceNavigateToMainMenu: 全方法失敗 — 再ログインを試行 (${attempt}/${MAX_RELOGIN_ATTEMPTS}, ${backoffSec}秒待機)`);
+        await this.sleep(backoffSec * 1000);
+
+        // 各リトライでもコンテキスト死亡チェック
+        await this.relaunchIfContextDead();
+
+        this.isLoggedIn = false;
+        try {
+          await this.login();
+        } catch (loginErr) {
+          logger.error(`forceNavigateToMainMenu: 再ログイン失敗 (${attempt}/${MAX_RELOGIN_ATTEMPTS}): ${(loginErr as Error).message}`);
+          if (attempt === MAX_RELOGIN_ATTEMPTS) {
+            throw new Error(`HAM サーバー接続不可 — ${MAX_RELOGIN_ATTEMPTS}回の再ログイン全て失敗`);
+          }
+          continue;
+        }
+
+        // 再ログイン後、HAM フレームが本当に読み込まれたか確認
+        // navigator が再起動で更新されている可能性があるため最新を使用
+        nav = this.navigator;
+        const hamPage = nav.hamPage;
+        const frames = hamPage.frames();
+        const hasErrorFrame = frames.some(f => f.url().startsWith('chrome-error://'));
+        if (hasErrorFrame) {
+          logger.error(`forceNavigateToMainMenu: 再ログイン後も chrome-error:// を検出 (${attempt}/${MAX_RELOGIN_ATTEMPTS})`);
+          if (attempt === MAX_RELOGIN_ATTEMPTS) {
+            throw new Error('HAM サーバー接続不可 — 再ログイン後もフレーム読み込み失敗');
+          }
+          continue;
+        }
+
+        logger.info('forceNavigateToMainMenu: 再ログインで復帰成功');
+        return;
+      }
     } catch (err) {
       logger.error(`forceNavigateToMainMenu エラー: ${(err as Error).message}`);
+      throw err; // 上位に伝播して早期終了させる
     }
   }
 

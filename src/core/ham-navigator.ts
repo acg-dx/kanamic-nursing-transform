@@ -132,7 +132,10 @@ export class HamNavigator {
       frame = await this.getMainFrame();
     }
 
-    await frame.evaluate((opts) => {
+    // form.submit() はフレーム遷移を発生させるため、evaluate の Promise が
+    // 実行コンテキスト破棄で永久にハングする可能性がある。
+    // タイムアウト付きの race で保護する。
+    const evalPromise = frame.evaluate((opts) => {
       /* eslint-disable @typescript-eslint/no-explicit-any */
       const win = window as any;
       // 送信ロック解除
@@ -184,6 +187,23 @@ export class HamNavigator {
       action: options.action,
       setLockCheck: options.setLockCheck || false,
       hiddenFields: options.hiddenFields || {},
+    });
+
+    // form.submit() 後の遷移でコンテキスト破棄 → evaluate がハングするケースを
+    // 5秒タイムアウトで保護。タイムアウトしても submit 自体は発行済みなので続行可能。
+    await Promise.race([
+      evalPromise,
+      this.sleep(5000).then(() => {
+        logger.debug('submitForm: evaluate タイムアウト（5秒） — フレーム遷移中。続行します');
+      }),
+    ]).catch((err) => {
+      // Execution context was destroyed / Target closed 等は form.submit() 成功の証拠
+      const msg = (err as Error).message || '';
+      if (msg.includes('Execution context') || msg.includes('Target closed') || msg.includes('Target crashed')) {
+        logger.debug(`submitForm: evaluate エラー（遷移成功と判断）: ${msg}`);
+      } else {
+        throw err;
+      }
     });
 
     // 遷移待ち
@@ -255,14 +275,14 @@ export class HamNavigator {
           if (opt.value === padded) { select.value = padded; return 'ok-padded'; }
         }
 
-        // テキスト部分一致
+        // テキスト完全一致（text が val そのもの、例: "15" === "15"）
         for (const opt of Array.from(select.options)) {
-          if (opt.text.includes(val) || opt.text.includes(unpadded)) {
-            select.value = opt.value; return 'ok-text';
+          if (opt.text.trim() === val || opt.text.trim() === unpadded || opt.text.trim() === padded) {
+            select.value = opt.value; return 'ok-text-exact';
           }
         }
 
-        const availableVals = Array.from(select.options).slice(0, 10).map(o => o.value);
+        const availableVals = Array.from(select.options).slice(0, 10).map(o => `${o.value}(${o.text.trim()})`);
         return `no-match:${JSON.stringify(availableVals)}`;
       }, { name: fieldName, val: value }).catch(() => 'error');
 
@@ -277,7 +297,7 @@ export class HamNavigator {
         continue;
       }
       logger.warn(`setSelectValue: ${fieldName}="${value}" が選択肢に見つかりません (${result})`);
-      return;
+      throw new Error(`setSelectValue: ${fieldName}="${value}" が選択肢に見つかりません (${result})`);
     }
     throw new Error(`select[name="${fieldName}"] not found (timeout)`);
   }
@@ -438,6 +458,10 @@ export class HamNavigator {
 
     await mainFrame.evaluate((flag) => {
       const form = document.forms[0];
+      if (!form?.showflag) {
+        const bodyText = document.body?.innerText?.substring(0, 200) || '';
+        throw new Error(`k2_3a の showflag が見つかりません（ページ未到達の可能性）。body=${bodyText}`);
+      }
       form.showflag.value = flag;
       /* eslint-disable @typescript-eslint/no-explicit-any */
       const win = window as any;

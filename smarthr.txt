@@ -1,0 +1,635 @@
+// ファクトリー
+function createCrew(crew) {
+  return new CrewClass(crew);
+}
+
+function empCode() { throw new Error('please call createCrew'); }
+function name() { throw new Error('please call createCrew'); }
+function businessName() { throw new Error('please call createCrew'); }
+function nameYomi() { throw new Error('please call createCrew'); }
+function department1AsArray() { throw new Error('please call createCrew'); }
+function department2AsArray() { throw new Error('please call createCrew'); }
+function department3AsArray() { throw new Error('please call createCrew'); }
+function department4AsArray() { throw new Error('please call createCrew'); }
+function department5AsArray() { throw new Error('please call createCrew'); }
+function department6AsArray() { throw new Error('please call createCrew'); }
+function department7AsArray() { throw new Error('please call createCrew'); }
+function department8AsArray() { throw new Error('please call createCrew'); }
+function department9AsArray() { throw new Error('please call createCrew'); }
+function department10AsArray() { throw new Error('please call createCrew'); }
+function department1SectionName() { throw new Error('please call createCrew'); }
+function base() { throw new Error('please call createCrew'); }
+function workingHours() { throw new Error('please call createCrew'); }
+function initialJobTitleOrQualification() { throw new Error('please call createCrew'); }
+function post() { throw new Error('please call createCrew'); }
+function enteredAt() { throw new Error('please call createCrew'); }
+function resignedAt() { throw new Error('please call createCrew'); }
+function cancelEnteredAt() { throw new Error('please call createCrew'); }
+function orientationDate() { throw new Error('please call createCrew'); }
+function employmentType() { throw new Error('please call createCrew'); }
+function initialJobType() { throw new Error('please call createCrew'); }
+function applicationSource() { throw new Error('please call createCrew'); }
+function workDaysPerWeek() { throw new Error('please call createCrew'); }
+function gwsAccount() { throw new Error('please call createCrew'); }
+function qualification1() { throw new Error('please call createCrew'); }
+function qualification2() { throw new Error('please call createCrew'); }
+function qualification3() { throw new Error('please call createCrew'); }
+function qualification4() { throw new Error('please call createCrew'); }
+function qualification5() { throw new Error('please call createCrew'); }
+function qualification6() { throw new Error('please call createCrew'); }
+function qualification7() { throw new Error('please call createCrew'); }
+function qualification8() { throw new Error('please call createCrew'); }
+function qualifications() { throw new Error('please call createCrew'); }
+function naming() { throw new Error('please call createCrew'); }
+
+(function(global) {
+  function CrewClass(crew) {
+    this.crew = crew;
+  }
+
+  /**
+   * 従業員番号取得
+   * @return {string}
+   */
+  CrewClass.prototype.empCode = function() {
+    return this.crew.emp_code;
+  }
+
+  /**
+   * 氏名取得
+   * @return {string}
+   */
+  CrewClass.prototype.name = function() {
+    return [
+      this.crew.last_name,
+      this.crew.first_name
+    ]
+    .filter(x => x).join(' ');
+  }
+
+  /**
+   * ビジネスネーム取得
+   * @return {string}
+   */
+  CrewClass.prototype.businessName = function() {
+    return [
+      this.crew.business_last_name,
+      this.crew.business_first_name
+    ]
+    .filter(x => x).join(' ');
+  }
+
+  /**
+   * 氏名フリガナ取得
+   * @return {string}
+   */
+  CrewClass.prototype.nameYomi = function() {
+    return [
+      this.crew.last_name_yomi,
+      this.crew.first_name_yomi
+    ]
+    .filter(x => x).join(' ');
+  }
+
+  /**
+   * 部署１の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department1AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 0), 3);
+  }
+
+  /**
+   * 部署２の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department2AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 1), 3);
+  }
+
+  /**
+   * 部署３の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department3AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 2), 3);
+  }
+
+  /**
+   * 部署４の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department4AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 3), 3);
+  }
+
+  /**
+   * 部署５の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department5AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 4), 3);
+  }
+
+  /**
+   * 部署６の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department6AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 5), 3);
+  }
+
+  /**
+   * 部署７の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department7AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 6), 3);
+  }
+
+  /**
+   * 部署８の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department8AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 7), 3);
+  }
+
+  /**
+   * 部署９の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department9AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 8), 3);
+  }
+
+  /**
+   * 部署１０の配列表現取得
+   * @return {string}
+   */
+  CrewClass.prototype.department10AsArray = function() {
+    return flattenNestedDeptObj(objVal(this.crew, 'departments', 9), 3);
+  }
+
+  /**
+   * 課名称取得
+   * @return {string}
+   */
+  CrewClass.prototype.department1SectionName = function() {
+    return objVal(this.crew, 'departments', 0, 'name');
+  }
+
+  /**
+   * 拠点取得
+   * @return {string}
+   */
+  CrewClass.prototype.base = function() {
+    const sectionName = this.department1SectionName;
+    return mappingTableSheetReader.getValue('拠点', sectionName);
+  }
+
+  /**
+   * 勤務時間帯取得
+   * return {string}
+   */
+  CrewClass.prototype.workingHours = function() {
+    return getCustomFieldValue(this.crew, '就業時間帯');
+  }
+
+  /**
+   * 役職_資格_採用時の情報
+   @return {string}
+   */
+  CrewClass.prototype.initialJobTitleOrQualification = function() {
+    return getCustomFieldValue(this.crew, '役職_資格_採用時の情報_');
+  }
+
+  CrewClass.prototype.post = function() {
+    // SmartHR項目見直し対応　役職、呼称、職種
+    if (!getCustomField(this.crew, "役職_等級_")) {
+      return this.grade(); // 標準「等級」
+    }
+    
+    return getCustomOptionFieldValue(this.crew, '役職_等級_');
+  }
+
+  /**
+   * 等級
+   * @return {string}
+   */
+  CrewClass.prototype.grade = function() {
+    return this.crew.grade ? this.crew.grade.name : null;
+  }
+
+  /**
+   * 役職
+   * @return {array}
+   */
+  CrewClass.prototype.positions = function() {
+    return this.crew.positions;
+  }
+
+  /**
+   * 役職 CSV文字列
+   * 区切り文字は半角カンマ
+   * @return {string}
+   */
+  CrewClass.prototype.positionCsvStr = function() {
+    if (!this.crew.positions) return null;
+    const result = this.crew.positions
+      .filter(position => position)
+      .map(position => position.name)
+      ;
+    return result.length > 0 ? result.join(',') : null;
+  }
+  /**
+   * 標準「職種」
+   * @return {string}
+   */
+  CrewClass.prototype.jobCategory = function() {
+    return this.crew.job_category ? this.crew.job_category.name : null;
+  }
+
+  /**
+   * 入社日取得
+   * @return {string}
+   */
+  CrewClass.prototype.enteredAt = function() {
+    return this.crew.entered_at;
+  }
+
+  /**
+   * 退職日取得
+   * @return {string}
+   */
+  CrewClass.prototype.resignedAt = function() {
+    return this.crew.resigned_at;
+  }
+
+  /**
+   * 入社取り消し日
+   * @return {string}
+   */
+  CrewClass.prototype.cancelEnteredAt = function() {
+    return getCustomFieldValue(this.crew, '入社取消日');
+  }
+
+  /**
+   * 入社オリエンテーションの年月日
+   * @return {string}
+   */
+  CrewClass.prototype.orientationDate = function() {
+    return getCustomFieldValue(this.crew, '入社オリエンテーションの年月日');
+  }
+
+  /**
+   * 雇用形態
+   */
+  CrewClass.prototype.employmentType = function() {
+    return objVal(this.crew, 'employment_type', 'name');
+  }
+
+  /**
+   * 職種
+   */
+  CrewClass.prototype.jobType = function() {
+    // SmartHR項目見直し対応　役職、呼称、職種
+    if (!getCustomField(this.crew, "役職_等級_")) {
+      return this.jobCategory();
+    }
+
+    return getCustomOptionFieldValue(this.crew, "職種");
+  }
+  
+  /**
+   * 職種（採用時の情報）
+   */
+  CrewClass.prototype.initialJobType = function() {
+    return getCustomOptionFieldValue(this.crew, '職種_採用時の情報_');
+  }
+
+  /** 
+   * どこ経由の応募か
+   */
+  CrewClass.prototype.applicationSource = function() {
+    return getCustomFieldValue(this.crew, 'どこ経由の応募か');
+  }
+
+  /**
+   * 週何回働くか
+   */
+  CrewClass.prototype.workDaysPerWeek = function() {
+    return getCustomFieldValue(this.crew, '週何回働くか');
+  }
+
+  /**
+   * GWSアカウント情報
+   */
+  CrewClass.prototype.gwsAccount = function() {
+    return getCustomFieldValue(this.crew, 'GWSアカウント');
+  }
+
+  /**
+   * 呼称
+   */
+  CrewClass.prototype.naming = function() {
+    // SmartHR項目見直し対応　役職、呼称、職種
+    if (!getCustomField(this.crew, "役職_等級_")) {
+      return this.positionCsvStr();
+    }
+
+    const naming1 = getCustomOptionFieldValue(this.crew, '呼称1');
+    const naming2 = getCustomOptionFieldValue(this.crew, '呼称2');
+    return [
+      naming1 === undefined ? '' : naming1,
+      naming2 === undefined ? '' : naming2,
+    ]
+    .filter(x => x).join(',');
+  }
+
+  /**
+   * 呼称1
+   */
+  CrewClass.prototype.naming1 = function() {
+    return getCustomOptionFieldValue(this.crew, '呼称1');
+  }
+
+  /**
+   * 呼称2
+   */
+  CrewClass.prototype.naming2 = function() {
+    return getCustomOptionFieldValue(this.crew, '呼称2');
+  }
+
+  CrewClass.prototype.employmentType = function() {
+    return this.crew.employment_type.name;
+  }
+
+  /**
+   * 資格1 ~ 8
+   */
+  CrewClass.prototype.qualification1 = function() { return getCustomOptionFieldValue(this.crew, '資格1')}
+  CrewClass.prototype.qualification2 = function() { return getCustomOptionFieldValue(this.crew, '資格2')}
+  CrewClass.prototype.qualification3 = function() { return getCustomOptionFieldValue(this.crew, '資格3')}
+  CrewClass.prototype.qualification4 = function() { return getCustomOptionFieldValue(this.crew, '資格4')}
+  CrewClass.prototype.qualification5 = function() { return getCustomOptionFieldValue(this.crew, '資格5')}
+  CrewClass.prototype.qualification6 = function() { return getCustomOptionFieldValue(this.crew, '資格6')}
+  CrewClass.prototype.qualification7 = function() { return getCustomOptionFieldValue(this.crew, '資格7')}
+  CrewClass.prototype.qualification8 = function() { return getCustomOptionFieldValue(this.crew, '資格8')}
+
+  /**
+   * 資格1 ~ 8リスト
+   */
+  CrewClass.prototype.qualifications = function() {
+    const result = [];
+    if (this.qualification1()) result.push(this.qualification1());
+    if (this.qualification2()) result.push(this.qualification2());
+    if (this.qualification3()) result.push(this.qualification3());
+    if (this.qualification4()) result.push(this.qualification4());
+    if (this.qualification5()) result.push(this.qualification5());
+    if (this.qualification6()) result.push(this.qualification6());
+    if (this.qualification7()) result.push(this.qualification7());
+    if (this.qualification8()) result.push(this.qualification8());
+    return result;
+  }
+  
+  /**
+   * カスタム項目取得
+   * @param {CrewClass} crew
+   * @param {string} column
+   * @return {string}
+   */
+  function getCustomFieldValue(crew, column) {
+    const customField = getCustomField(crew, column);
+    return customField && customField.value;
+  }
+
+  /**
+   * オプション型カスタム項目値取得
+   * @param {CrewClass} crew
+   * @param {string} column
+   * @return {string}
+   */
+  function getCustomOptionFieldValue(crew, column) {
+    const customField = getCustomField(crew, column);
+    if (!customField) return;
+
+    const optionElements = customField.template.elements;
+
+    const optionElement =
+      optionElements &&
+      optionElements.find(e => e.physical_name === customField.value);
+
+    return optionElement && optionElement.name;
+  }
+
+  /**
+   * カスタム項目オブジェクト取得
+   * @param {CrewClass} crew
+   * @param {string} column
+   * @return {object}
+   */
+  function getCustomField(crew, column) {
+    const idToFind = getCustomFieldId(column);
+    return crew.custom_fields
+        .find((cf) => cf.template.id === idToFind);
+  }
+
+  /**
+   * Id取得
+   * @param {string} column - カラム参照名   '資格_１'など
+   * @return {string}
+   */
+  function getCustomFieldId(column) {
+    const row = getCustomFieldList().find(r => r[0] === column);
+    return row && row[1];
+  }
+
+  function objVal(obj, ...keys) {
+    if (!obj) return obj;
+    for (key of keys) {
+      obj = obj[key];
+      if (!obj) return obj;
+    }
+    return obj;
+  }
+
+  function getCustomFieldList() {
+    return [
+      [ '入社オリエンテーションの年月日', '8f11a40c-a5ec-40a7-a6fa-a87c69c9122c' ],
+      [ '役職_資格_採用時の情報_', '58e82c01-cf44-4f85-b077-a77efde06f36' ],
+      [ '会社貸与の電話番号', 'e310dbe9-ec13-49c4-87d0-b90b6bd46a66' ],
+      [ 'GWSアカウント', '35605bab-85ac-4b05-ad08-20f6b81f855a' ],
+      [ '入社前の貸与品準備', 'e907d4b3-1e6f-449f-8da9-a3b43b1b2d8f' ],
+      [ '役職_等級_', 'a19c8286-2386-401f-b121-300024e227a6' ],
+      //[ '役職_等級_', 'xxx' ],
+      [ '就業時間帯', '5b919c90-8036-462a-9660-3cc1f64c7af9' ],
+      [ 'どこ経由の応募か', '4e731edb-feee-4c60-a6a9-97e7938b762a' ],
+      // [ '職種_採用時の情報_', '9dca2a4b-78e1-4bb0-97dd-389e13d99b0e' ],
+      [ '職種', '9dca2a4b-78e1-4bb0-97dd-389e13d99b0e' ],
+      //[ '職種', 'xxx' ],
+      [ '雇用形態その2', '7e153e74-9687-4227-a168-083ea3437550' ],
+      [ '資格1', '21289acb-d3f2-4ed7-84aa-5c42d0096c0d' ],
+      [ '資格1の証憑', 'bdcdabea-858f-47da-8c6a-46f8d58f272d' ],
+      [ '資格2', '14fe29ec-d0ef-4895-8121-901bd49b892e' ],
+      [ '資格2の証憑', '75c8b84c-d3c0-429a-8c8e-f7ab3afb1855' ],
+      [ '資格3', '773fbe7d-3457-4dc6-b702-5f0448432632' ],
+      [ '資格3の証憑', 'a83d3a20-4653-461d-9c2b-5641a370f901' ],
+      [ '資格4', 'e8be0014-51a3-4125-8506-80915529f9fa' ],
+      [ '資格4の証憑', 'e19f2139-7ea2-461c-88d1-f8dc9ed746be' ],
+      [ '資格5', '3fa29e52-367d-4908-88a1-86a68a999a21' ],
+      [ '資格5の証憑', '4d00c938-8194-48d2-b625-4ed38abd289a' ],
+      [ '資格6', '1631fb4c-93dd-4453-a74c-fd16d8e2edc3' ],
+      [ '資格6の証憑', '4adf84fd-33ec-485d-9f53-9da498a496c3' ],
+      [ '資格7', '4bc6b84d-45e1-498e-bc5f-1302b3b3f5d0' ],
+      [ '資格7の証憑', '18e80c28-36b9-49bf-85d0-5446d8f079b3' ],
+      [ '資格8', '356e88dc-5bef-46f0-af3e-7ea34e83ded3' ],
+      [ '資格8の証憑', '5183a824-0d55-4bc4-94e2-8ee065406905' ],
+      [ '週何回働くか', '41da9f16-0260-4cc5-a317-c3736cb6e55c' ],
+      [ '入社取消日', '6a94a506-5c64-4344-8f37-26507e0db768' ],
+      [ '会社法上の役職', 'd7308cfd-0b0a-45a1-94ea-03fccfd25022' ],
+      [ '呼称1', 'a556b912-4573-4804-b47a-0d0923301c56' ],
+      [ '呼称2', 'b104c31d-c263-4e97-98b4-cf6d4e0747a1' ],
+      [ '最新の人事情報', '41ec54af-98c2-4ec0-86ea-451da7014551' ],
+      [ '本名', 'dcdbb068-5c86-4c51-a4de-8fa9c0b1d360' ]
+    ]
+  }
+
+  global.CrewClass = CrewClass;
+})(this);function createDepartment(department) {
+  return new DepartmentClass(department);
+}
+
+function id() { throw new Error("please call createDepartment"); }
+function name() { throw new Error("please call createDepartment"); }
+function fullName() { throw new Error("please call createDepartment"); }
+
+(function(global) {
+  function DepartmentClass(department) {
+    this.department = department;
+  }
+
+  /**
+   * 部署番号取得
+   * @return {string}
+   */
+  DepartmentClass.prototype.id = function() {
+    return this.department.id;
+  }
+
+  /**
+   * 部署名
+   * @return {string}
+   */
+  DepartmentClass.prototype.name = function() {
+    return this.department.name;
+  }
+
+  
+  /**
+   * 部署名
+   * @return {string}
+   */
+  DepartmentClass.prototype.fullName = function() {
+    return this.department.full_name;
+  }
+
+  global.DepartmentClass = DepartmentClass;
+})(this);const API_VERSION = 'v1';
+const API_BASE_URL = `https://acg.smarthr.jp/api/${API_VERSION}/`;
+const API_CREW_URL = API_BASE_URL + 'crews';
+const API_DEPARTMENT_URL = API_BASE_URL + 'departments';
+const ACCESS_TOKEN = 'shr_307f_kZFPn3MXM6QuLDShCev5sKusWMsPHzdM';
+
+/**
+ * 従業員インスタンス一覧取得
+ * @param {object} params
+ * @return {array<CrewClass>}
+ */
+function getAllCrew(params={}) {
+  const crews = getAllAPIReuslts(API_CREW_URL, params);
+  const crewObjcts = crews.map(crew => createCrew(crew));
+  return crewObjcts;
+}
+
+/**
+ * 部署インスタンス一覧取得
+ * @param {object} params
+ * @return {array<DepartmentClass>}
+ */
+function getAllDepartment(params={}) {
+  const departments = getAllAPIReuslts(API_DEPARTMENT_URL, params);
+  const departmentObjcts = departments.map(department => createDepartment(department));
+  return departmentObjcts;
+}
+
+// 部署の階層表現から部署名の配列を取得
+// dept: 部署の入れ子表現
+// level: 出力要素数
+function flattenNestedDeptObj(dept, level) {
+  const flattenNestedDept = (dept, maxLevel) => {
+    if (!dept) return [];                   // 親がない
+    if (maxLevel == 1) return [dept.name];  // 階層が深すぎ
+    return [...flattenNestedDept(dept.parent, maxLevel - 1), dept.name];
+  }
+  // 　levelに指定された個数を返却
+  const deptArray = flattenNestedDept(dept, 3);
+  while (deptArray.length < level) deptArray.push(""); // 長さを調整
+  return deptArray;
+};
+
+/**
+ * SmartHR APIアクセス
+ */
+function getAuthHeader() {
+  return {
+    'Authorization': 'Bearer ' + ACCESS_TOKEN,
+  };
+}
+
+// URLのパラメタを追加（存在するものは上書き)
+function addOrReplaceUrlParameter(url, params) {
+  const [base, qstr] = url.split('?');
+
+  // params に含まれるキーを除外
+  const keyVals = (qstr || "").split("&").filter(kv => !kv.split("=")[0] in params);
+  const appendedKeyVals = Object.keys(params).map(key => encodeURI(key) + "=" + encodeURI(params[key]));
+
+  return base + "?" + keyVals.concat(appendedKeyVals).join('&');
+}
+
+/**
+ * 全一覧取得
+ * ページ分割された全てのページの結果をまとめて返却
+ * @param { string } url
+ * @param { object }
+ */
+function getAllAPIReuslts(url, params = {}) {
+  let page = 0;
+  const perPage = 100;
+  let results = [];
+  let recCount  = 0;
+  do {
+    page++;
+    const pageUrl = addOrReplaceUrlParameter(url, {
+      ...params,
+      page,
+      per_page: perPage
+    });
+
+    const res = UrlFetchApp.fetch(pageUrl, {
+      method: "get",
+      headers: getAuthHeader(),
+      muteHttpExceptions: false,
+    });
+
+    if (res.getResponseCode() != 200) {
+      console.log(res);
+      throw new Error("API アクセス失敗 code:" + res.getResponseCode() + res.getContentText());
+    }
+    results = results.concat(JSON.parse(res.getContentText()));
+    recCount = res.getHeaders()["x-total-count"]
+  } while(perPage * page < recCount)
+
+  return results;
+}

@@ -50,13 +50,16 @@ function createServices() {
   const selectorEngine = new SelectorEngine(aiHealing);
   const sheets = new SpreadsheetService(config.sheets.serviceAccountKeyPath);
   const browser = new BrowserManager(selectorEngine);
+
+  // RUN_LOCATIONS で絞り込まれた最初の事業所の情報で HAM にログイン
+  const primaryLocation = config.sheets.locations[0];
   const auth = new KanamickAuthService({
     url: config.kanamick.url,
     username: config.kanamick.username,
     password: config.kanamick.password,
-    stationName: process.env.KANAMICK_STATION_NAME || '訪問看護ステーションあおぞら姶良',
+    stationName: primaryLocation?.stationName || '訪問看護ステーションあおぞら姶良',
     hamOfficeKey: process.env.KANAMICK_HAM_OFFICE_KEY || '6',
-    hamOfficeCode: process.env.KANAMICK_HAM_OFFICE_CODE || '400021814',
+    hamOfficeCode: primaryLocation?.hamOfficeCode || '400021814',
   });
   return { browser, selectorEngine, sheets, auth };
 }
@@ -66,7 +69,7 @@ async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'buildin
 
   try {
     await browser.launch();
-    auth.setContext(browser.browserContext);
+    auth.setContext(browser.browserContext, browser);
     await auth.login();
 
     const context: WorkflowContext = {
@@ -154,7 +157,7 @@ async function runDailyJob(): Promise<void> {
       try {
         const { browser, selectorEngine, auth } = createServices();
         await browser.launch();
-        auth.setContext(browser.browserContext);
+        auth.setContext(browser.browserContext, browser);
         try {
           const smarthr = new SmartHRService(smarthrConfig);
           const staffSync = new StaffSyncService(smarthr, auth);
@@ -250,17 +253,45 @@ async function main(): Promise<void> {
       logger.info(`対象タブ: ${tabArg}`);
     }
     try {
+      const allResults: WorkflowResult[] = [];
+
+      // 転記ワークフローの場合、前月未登録を自動処理
+      if (workflowArg === 'transcription' && !tabArg) {
+        const preflight_sheets = new SpreadsheetService(config.sheets.serviceAccountKeyPath);
+        const reconciliation = new ReconciliationService(preflight_sheets);
+        const now = new Date();
+        const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const prevTab = `${prev.getFullYear()}年${String(prev.getMonth() + 1).padStart(2, '0')}月`;
+
+        let hasPrevPending = false;
+        for (const location of config.sheets.locations) {
+          const prevResult = await reconciliation.checkPreviousMonthUnregistered(location.sheetId);
+          if (prevResult.hasPending) {
+            logger.warn(`[${location.name}] 前月(${prevTab})に未登録レコード ${prevResult.pendingCount} 件を検出`);
+            hasPrevPending = true;
+          }
+        }
+
+        if (hasPrevPending) {
+          logger.info(`=== 前月(${prevTab})の未登録分を先に転記します ===`);
+          const prevResults = await runWorkflow('transcription', prevTab);
+          allResults.push(...prevResults);
+          logger.info(`=== 前月(${prevTab})転記完了。当月に進みます ===`);
+        }
+      }
+
       const results = await runWorkflow(workflowArg as 'transcription' | 'deletion' | 'building', tabArg);
+      allResults.push(...results);
 
       // 手動実行でもメール通知を送信
       const notifService = new NotificationService(notificationConfig);
-      if (notifService.isEnabled() && results.length > 0) {
+      if (notifService.isEnabled() && allResults.length > 0) {
         const today = new Date().toISOString().split('T')[0];
-        const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
-        const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
+        const totalProcessed = allResults.reduce((sum, r) => sum + r.processedRecords, 0);
+        const totalErrors = allResults.reduce((sum, r) => sum + r.errorRecords, 0);
         const dailyReport: DailyReport = {
           date: today,
-          reports: results.map(r => ({
+          reports: allResults.map(r => ({
             workflowName: r.workflowName,
             locationName: r.locationName,
             success: r.success,

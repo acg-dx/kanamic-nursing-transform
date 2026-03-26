@@ -1,0 +1,196 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1771996923377,
+  "projectRoot": "/mnt/c/projects/転記RPA",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "playwright",
+        "version": "1.50.0",
+        "category": "testing"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "build": "tsc",
+      "start": "node dist/index.js",
+      "dev": "tsx src/index.ts",
+      "workflow:transcription": "tsx src/index.ts --workflow transcription",
+      "workflow:deletion": "tsx src/index.ts --workflow deletion",
+      "workflow:building": "tsx src/index.ts --workflow building"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase",
+    "importStyle": "ES modules",
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "logs": {
+      "path": "logs",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1771996923314,
+      "keyFiles": []
+    },
+    "screenshots": {
+      "path": "screenshots",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1771996923323,
+      "keyFiles": []
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 1,
+      "lastAccessed": 1771996923331,
+      "keyFiles": [
+        "index.ts"
+      ]
+    },
+    "src/config": {
+      "path": "src/config",
+      "purpose": "Configuration files",
+      "fileCount": 1,
+      "lastAccessed": 1771996923350,
+      "keyFiles": [
+        "app.config.ts"
+      ]
+    },
+    "src/scripts": {
+      "path": "src/scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1771996923359,
+      "keyFiles": [
+        "inspect-sheets.ts"
+      ]
+    },
+    "src/services": {
+      "path": "src/services",
+      "purpose": "Business logic services",
+      "fileCount": 2,
+      "lastAccessed": 1771996923370,
+      "keyFiles": [
+        "kanamick-auth.service.ts",
+        "spreadsheet.service.ts"
+      ]
+    },
+    "src/types": {
+      "path": "src/types",
+      "purpose": "Type definitions",
+      "fileCount": 4,
+      "lastAccessed": 1771996923377,
+      "keyFiles": [
+        "config.types.ts",
+        "selector.types.ts",
+        "spreadsheet.types.ts"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/types/workflow.types.ts",
+      "accessCount": 6,
+      "lastAccessed": 1771999295899,
+      "type": "file"
+    },
+    {
+      "path": "src/services/spreadsheet.service.ts",
+      "accessCount": 5,
+      "lastAccessed": 1771999356463,
+      "type": "file"
+    },
+    {
+      "path": "src/index.ts",
+      "accessCount": 5,
+      "lastAccessed": 1771999477647,
+      "type": "file"
+    },
+    {
+      "path": "src/workflows/base-workflow.ts",
+      "accessCount": 3,
+      "lastAccessed": 1771999443636,
+      "type": "file"
+    },
+    {
+      "path": "src/core/browser-manager.ts",
+      "accessCount": 3,
+      "lastAccessed": 1771999698453,
+      "type": "file"
+    },
+    {
+      "path": "src/workflows/transcription/transcription.workflow.ts",
+      "accessCount": 2,
+      "lastAccessed": 1771997034101,
+      "type": "file"
+    },
+    {
+      "path": "src/workflows/deletion/deletion.workflow.ts",
+      "accessCount": 2,
+      "lastAccessed": 1771997047861,
+      "type": "file"
+    },
+    {
+      "path": "src/types/config.types.ts",
+      "accessCount": 2,
+      "lastAccessed": 1771999253368,
+      "type": "file"
+    },
+    {
+      "path": "src/config/app.config.ts",
+      "accessCount": 2,
+      "lastAccessed": 1771999262473,
+      "type": "file"
+    },
+    {
+      "path": "src/services/kanamick-auth.service.ts",
+      "accessCount": 1,
+      "lastAccessed": 1771996940733,
+      "type": "file"
+    },
+    {
+      "path": "同一建物管理.txt",
+      "accessCount": 1,
+      "lastAccessed": 1771998955474,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

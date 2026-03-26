@@ -1,0 +1,20 @@
+=== ERRORS: 看護医療 records only ===
+  冨迫広美 (准看護師): 准あり=0, 准なし=123, エラー=123
+  永松アケミ (准看護師): 准あり=0, 准なし=89, エラー=89
+  有村愛 (看護師): 准あり=0, 准なし=109, エラー=0
+  木場亜紗実 (看護師): 准あり=0, 准なし=10, エラー=0
+  合計エラー (看護医療のみ): 212
+
+=== IMPORTANT: 介護 records do NOT use ・准 convention ===
+  介護 (訪問看護 service type) records use abbreviated codes: 訪看Ⅰ２, 訪看Ⅰ３, etc.
+  These do NOT distinguish 看護師/准看護師 with ・准 suffix
+  Only 看護医療 records use: 訪問看護基本療養費（Ⅰ・Ⅱ）・准 convention
+
+  Exception: 訪看Ⅰ２・准 appears in 介護 records (4 records)
+  These seem to be a different kind of 准 marker in 介護 context
+
+=== 訪看Ⅰ２・准 records in 介護 context ===
+  2026-02-01 13:00 | 木場　亜紗実 | 榮　博造 | stype=訪問看護 | sc=訪看�T２・准
+  2026-02-01 13:00 | 冨迫　広美 | 榮　博造 | stype=訪問看護 | sc=訪看�T２・准
+  2026-02-04 13:00 | 冨迫　広美 | 前田　清子 | stype=訪問看護 | sc=訪看�T２・准
+  2026-02-04 13:00 | 有村　愛 | 前田　清子 | stype=訪問看護 | sc=訪看�T２・准

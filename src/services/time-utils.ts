@@ -67,16 +67,19 @@ export function getTimetype(startTime: string, endTime: string): string {
 
 /**
  * 時刻から starttype/endtype（時間帯区分）を算出
- *   1 = 日中（6:00-18:00）
- *   2 = 夜間・早朝（18:00-22:00 or 4:00-6:00）
- *   3 = 深夜（22:00-4:00）
+ *
+ * HAM の starttime0 ドロップダウン選択肢:
+ *   1 = 昼間: 08〜17
+ *   2 = 夜朝: 06〜07, 18〜21
+ *   3 = 深夜: 22〜05
+ *   0 = 指定なし: 全時間帯
  */
 export function getTimePeriod(time: string): string {
   const [h] = time.split(':').map(Number);
-  if (h >= 6 && h < 18) return '1';    // 日中
-  if (h >= 18 && h < 22) return '2';   // 夜間
-  if (h >= 22 || h < 6) return '3';    // 深夜
-  return '1'; // default
+  if (h >= 8 && h < 18) return '1';    // 昼間 (HAM: 08-17)
+  if ((h >= 6 && h < 8) || (h >= 18 && h < 22)) return '2';   // 夜朝 (HAM: 06-07, 18-21)
+  if (h >= 22 || h < 6) return '3';    // 深夜 (HAM: 22-05)
+  return '0';                           // フォールバック
 }
 
 /**

@@ -139,6 +139,21 @@ export class SpreadsheetService {
     });
   }
 
+  /**
+   * 実績ロック（Z列）を解除する（FALSE にクリア）
+   * 看護記録が転記後に更新された場合、再転記を可能にするために使用
+   */
+  async unlockRecord(sheetId: string, rowIndex: number, tab?: string): Promise<void> {
+    tab = tab || getCurrentMonthTab();
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tab}!${colToLetter(COL_RECORD_LOCKED)}${rowIndex}`, // Z(25) 実績ロック
+      valueInputOption: 'RAW',
+      requestBody: { values: [['FALSE']] },
+    });
+    logger.debug(`実績ロック解除: row=${rowIndex}`);
+  }
+
   /** HAM assignId を月次Sheet AA列に書き込む（転記時に保存、削除時に使用） */
   async writeHamAssignId(sheetId: string, rowIndex: number, assignId: string, tab?: string): Promise<void> {
     tab = tab || getCurrentMonthTab();
@@ -688,6 +703,55 @@ export class SpreadsheetService {
     });
 
     logger.info(`建物管理: ${records.length} 件を「${tab}」に書き込みました`);
+  }
+
+  /**
+   * 指定セルの背景色を変更する（修正箇所ハイライト用）
+   * @param cells 行・列の配列 (rowIndex は 1-indexed, col は 0-indexed)
+   * @param color RGB 色 (0.0-1.0)。デフォルト: 薄赤 #FFCCCC
+   */
+  async highlightCells(
+    sheetId: string,
+    tab: string,
+    cells: Array<{ row: number; col: number }>,
+    color: { red: number; green: number; blue: number } = { red: 1.0, green: 0.8, blue: 0.8 },
+  ): Promise<void> {
+    if (cells.length === 0) return;
+    try {
+      const spreadsheet = await this.sheets.spreadsheets.get({ spreadsheetId: sheetId, fields: 'sheets.properties' });
+      const sheet = spreadsheet.data.sheets?.find(s => s.properties?.title === tab);
+      if (!sheet?.properties?.sheetId && sheet?.properties?.sheetId !== 0) {
+        logger.warn(`highlightCells: シート「${tab}」が見つかりません`);
+        return;
+      }
+      const gid = sheet.properties.sheetId;
+
+      const requests = cells.map(cell => ({
+        repeatCell: {
+          range: {
+            sheetId: gid,
+            startRowIndex: cell.row - 1,   // 0-indexed
+            endRowIndex: cell.row,
+            startColumnIndex: cell.col,
+            endColumnIndex: cell.col + 1,
+          },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: color,
+            },
+          },
+          fields: 'userEnteredFormat.backgroundColor',
+        },
+      }));
+
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: { requests },
+      });
+      logger.debug(`highlightCells: ${cells.length}セルをハイライト (${tab})`);
+    } catch (error) {
+      logger.warn(`highlightCells エラー: ${(error as Error).message}`);
+    }
   }
 
   /**

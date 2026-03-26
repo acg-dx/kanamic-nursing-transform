@@ -1,0 +1,144 @@
+=== 実データ転記テスト（姶良） ===
+
+Step 0: Google Sheets データ取得...
+  全レコード数: 722
+  転記対象: 719件
+
+  処理レコード (row=5):
+    記録者: 荒垣久美子 (1793)
+    利用者: 窪田正浩 (aozoraID=6339)
+    2026-02-01 18:00-18:30
+    医療 / 通常（定期）
+    → 訪問看護基本療養費（Ⅰ・Ⅱ） (showflag=3, 93#1001)
+    HAM: date=20260201 month=20260201 time=60 period=2
+
+--- ブラウザ起動 ---
+ログイン中...
+TRITRUS ログイン開始...
+TRITRUS ポータル表示: https://bi.kanamic.net/josso/signon/login.do?josso_back_to=https://portal.kanamic.net/tritrus/josso_security_check
+ログイン完了: https://portal.kanamic.net/tritrus/index/
+HAMリンク未検出。訪問看護フィルタを適用...
+HAMリンク: "訪問看護ステーションあおぞら姶良" target="new_win_1"
+新タブ: https://portal.kanamic.net/tritrusutil/goCicHam.jsp?c=554128&h=400021814&k=6
+HAMリダイレクト完了: https://www2.kanamic.net/kanamic/ham/hamfromout.go
+HAM ページ確認: https://www2.kanamic.net/kanamic/ham/hamfromout.go
+HAM フレーム数: 6
+  frame: name="" url="https://www2.kanamic.net/kanamic/ham/hamfromout.go"
+  frame: name="kanamicmain" url="https://www2.kanamic.net/kanamic/ham/t1-2Action.go"
+  frame: name="commontarget" url="https://www2.kanamic.net/kanamic/jsp/default/ham/commontarget.jsp"
+  frame: name="topFrame" url="https://www2.kanamic.net/kanamic/jsp/default/ham/top/t1-2_top.jsp?uni=E54F58D190ED69AFF24446E279D4D831.apl35177210360456"
+  frame: name="mainFrame" url="https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=t1-2&uni=E54F58D190ED69AFF24446E279D4D831.apl351772103604567"
+  frame: name="" url="https://www2.kanamic.net/kanamic/ham/tnews_PPInfoAction.go?doAction=tnews_PPInfo&pageID=t1-2&newsid=13088"
+TRITRUS → HAM ログイン完了
+  ✅ ログイン成功
+
+Step 1-2: 業務ガイド → 利用者検索...
+訪問看護業務ガイドに遷移
+利用者検索に遷移
+  pageId: k2_1
+
+  --- k2_1 利用者検索 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_1&uni=E54F58D190E) ---
+    SELECT name="searchdate" id="" opts=[20260801="2026年08月", 20260701="2026年07月", 20260601="2026年06月", 20260501="2026年05月", 20260401="2026年04月"... (79)]
+    SELECT name="searchUsergroup" id="" opts=[="全グループ"]
+    SELECT name="searchkind" id="" opts=[1="50音順", 30="本日訪問看護サービス予定のある人", 31="明日訪問看護サービス予定のある人", 32="昨日訪問看護サービス予定のあった人", 5="認定有効期間今月で終了する"... (27)]
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_search_word" id="" value="検索"
+    INPUT type="button" name="act_printschedule" id="" value="PDF表示"
+    INPUT type="button" name="act_print" id="" value="PDF表示"
+    INPUT type="button" name="act_helperas" id="" value="PDF表示"
+    INPUT type="button" name="act_covid" id="" value="CSV出力"
+    HIDDEN name="pageID" value="k2_1"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="0"
+    HIDDEN name="saveSearchkaigoStopreason" value="0"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value=""
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value=""
+    HIDDEN name="saveSearchTais" value=""
+    HIDDEN name="saveSearchGoodsCode" value=""
+    HIDDEN name="saveSearchShopname" value=""
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    HIDDEN name="keyword" value=""
+    HIDDEN name="careuserid" value=""
+    HIDDEN name="servicedate" value="20260201"
+    HIDDEN name="searchFlag" value="0"
+    HIDDEN name="saveUsergroup" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 登録者条件検索 | （左下の表から頭文字検索を行うと、条件選択は無効になります） | 現在の登録者102人 | 年月選択  | 2026年08月 | 2026年07月 | 2026年06月 | 2026年05月 | 2026年04月 | 2026年03月 | 2026年02月 | 2026年01月 | 2025年12月 | 2025年11月 | 2025年10月 | 2025年09月 | 2025年08月 | 2025年07月 | 2025年06月 | 2025年05月 | 2025年04月 | 2025年03月 | 2025年02
+
+Step 3: 年月設定 & 検索 (monthStart=20260201)...
+  ✅ 検索完了
+
+Step 4: 患者「窪田正浩」検索...
+  ✅ 患者ID: 8876498
+  ✅ k2_2 月間スケジュール
+
+Step 5: 追加 (date=20260201)...
+  ✅ k2_3 (pageId=k2_3)
+
+  --- k2_3 スケジュール追加 (https://www2.kanamic.net/kanamic/ham/goPageAction.go?pageId=k2_3&uni=E54F58D190E) ---
+    SELECT name="editdate" id="" opts=[20260201="01", 20260202="02", 20260203="03", 20260204="04", 20260205="05"... (28)]
+    SELECT name="starttype" id="" opts=[1="昼間", 2="夜朝", 3="深夜", 0="指定なし"]
+    SELECT name="starttime0" id="" opts=[="--", 08="08", 09="09", 10="10", 11="11"... (11)]
+    SELECT name="starttime1" id="" opts=[00="00", 01="01", 02="02", 03="03", 04="04"... (60)]
+    SELECT name="timetype" id="" opts=[0="--", 20="20分未満", 21="20分", 30="30分未満", 60="1時間未満"... (7)]
+    SELECT name="endtype" id="" opts=[1="昼間", 2="夜朝", 3="深夜", 0="指定なし"]
+    SELECT name="endtime0" id="" opts=[="--", 00="00", 01="01", 02="02", 03="03"... (31)]
+    SELECT name="endtime1" id="" opts=[00="00", 01="01", 02="02", 03="03", 04="04"... (60)]
+    INPUT type="button" name="act_back" id="" value="戻る"
+    INPUT type="button" name="act_next" id="" value="次へ"
+    HIDDEN name="pageID" value="k2_3"
+    HIDDEN name="doAction" value=""
+    HIDDEN name="doTarget" value=""
+    HIDDEN name="slowPdfFilename" value=""
+    HIDDEN name="lockCheck" value="0"
+    HIDDEN name="saveSearchdate" value=""
+    HIDDEN name="bakofsave" value=""
+    HIDDEN name="saveSearchkind" value="1"
+    HIDDEN name="saveSearchkaigoStopreason" value="No getter method for property saveSearchkaigoStopreason of b"
+    HIDDEN name="saveSearchKeyword" value=""
+    HIDDEN name="saveSearchUserName" value=""
+    HIDDEN name="saveSearchMode" value="act_search"
+    HIDDEN name="saveSearchAddress" value=""
+    HIDDEN name="saveSearchGoodsname" value="No getter method for property saveSearchGoodsname of bean or"
+    HIDDEN name="saveSearchTais" value="No getter method for property saveSearchTais of bean org.apa"
+    HIDDEN name="saveSearchGoodsCode" value="No getter method for property saveSearchGoodsCode of bean or"
+    HIDDEN name="saveSearchShopname" value="No getter method for property saveSearchShopname of bean org"
+    HIDDEN name="saveSearchInsurername" value=""
+    HIDDEN name="saveSearchInsurantcd" value=""
+    HIDDEN name="saveSearchTel" value=""
+    BODY_TEXT: 	 （前の画面にもどりたい時はこちらから ） |  |  | 2026年02月  | 01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 |  日 利用者スケジュール追加 |  |  |  | 本日のサービス予定 | 時間	スタッフ名	サービス種類 | 	 	 | 追加提供時間 |  | 開始時間	 | 昼間 | 夜朝 | 深夜 | 指定なし |   | -- | 08 |
+
+Step 6: 時間設定 18:00-18:30 (type=60)...
+  k2_3 selects:
+    editdate: [20260201,20260202,20260203,20260204,20260205,20260206,20260207,20260208...(28)] current="20260201"
+    starttype: [1,2,3,0] current="1"
+    starttime0: [,08,09,10,11,12,13,14...(11)] current=""
+    starttime1: [00,01,02,03,04,05,06,07...(60)] current="00"
+    timetype: [0,20,21,30,60,90,91] current="0"
+    endtype: [1,2,3,0] current="0"
+    endtime0: [,00,01,02,03,04,05,06...(31)] current=""
+    endtime1: [00,01,02,03,04,05,06,07...(60)] current="00"
+  設定値: starttype=2 start=18:00 timetype=60 endtype=2 end=18:30
+  starttype 変更: 1 → 2 (onchange 発火)...
+  starttype 変更後のフレーム再取得完了
+  starttime0 利用可能時間: [06,07,18,19,20,21]
+
+❌ エラー: frame.evaluate: ReferenceError: __name is not defined
+    at eval (eval at evaluate (:290:30), <anonymous>:1:43)
+    at UtilityScript.evaluate (<anonymous>:292:16)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+frame.evaluate: ReferenceError: __name is not defined
+    at eval (eval at evaluate (:290:30), <anonymous>:1:43)
+    at UtilityScript.evaluate (<anonymous>:292:16)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+    at main (C:\projects\転記RPA\src\scripts\test-real-transcription.ts:300:39)
+ブラウザ終了

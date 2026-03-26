@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+.git/
+.gitignore
+logs/
+screenshots/
+*.csv
+*.json.bak
+.vscode/
+*.md
+vitest.config.*

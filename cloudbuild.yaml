@@ -1,0 +1,26 @@
+# ============================================================
+# Cloud Build — 転記RPA イメージのビルド＆プッシュ
+#
+# 使用方法:
+#   gcloud builds submit --config=cloudbuild.yaml --project=acg-rpa-playwright .
+# ============================================================
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-northeast1-docker.pkg.dev/acg-rpa-playwright/nursing-record/tenki-rpa:$SHORT_SHA'
+      - '-t'
+      - 'asia-northeast1-docker.pkg.dev/acg-rpa-playwright/nursing-record/tenki-rpa:latest'
+      - '.'
+
+images:
+  - 'asia-northeast1-docker.pkg.dev/acg-rpa-playwright/nursing-record/tenki-rpa:$SHORT_SHA'
+  - 'asia-northeast1-docker.pkg.dev/acg-rpa-playwright/nursing-record/tenki-rpa:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+timeout: '1200s'

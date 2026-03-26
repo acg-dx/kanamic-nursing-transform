@@ -2,6 +2,13 @@
 # ============================================================
 # 転記RPA — Cloud Run Job デプロイスクリプト
 #
+# 4事業所それぞれに独立した Cloud Run Job を作成:
+#   tenki-transcription-aira   (姶良)
+#   tenki-transcription-arata  (荒田)
+#   tenki-transcription-taniyama (谷山)
+#   tenki-transcription-fukuoka (福岡)
+#   tenki-building-data        (同一建物データ取得 — 共通)
+#
 # 使用方法:
 #   ./deploy.sh build          # イメージをビルド＆プッシュのみ
 #   ./deploy.sh jobs           # Cloud Run Jobs を作成/更新のみ
@@ -18,38 +25,30 @@ IMAGE="asia-northeast1-docker.pkg.dev/${PROJECT_ID}/nursing-record/tenki-rpa:lat
 SA="324463713340-compute@developer.gserviceaccount.com"
 VPC_CONNECTOR="nursing-connector"
 
-# Cloud Run Job 名
-JOB_TRANSCRIPTION="tenki-transcription"
-JOB_BUILDING_DATA="tenki-building-data"
-
-# === 環境変数（Secret Manager に入れない非機密値） ===
-# 機密情報は gcloud run jobs update --set-secrets で別途設定する
+# === 共通環境変数 ===
 COMMON_ENV="TZ=Asia/Tokyo"
 COMMON_ENV+=",NODE_ENV=production"
 COMMON_ENV+=",HEADLESS=true"
 COMMON_ENV+=",GOOGLE_SERVICE_ACCOUNT_KEY_PATH=./kangotenki.json"
 COMMON_ENV+=",NOTIFICATION_WEBHOOK_URL=${NOTIFICATION_WEBHOOK_URL:-https://script.google.com/macros/s/AKfycbzkOEXAoXzLWXPLQF-eT2UnPuAXvHbucXBtv6O5b_KWTHrRaVwLXclBs3JrJs0KwKxpDQ/exec}"
-COMMON_ENV+=",NOTIFICATION_TO=${NOTIFICATION_TO:-dxgroup@aozora-cg.com}"
+COMMON_ENV+=",NOTIFICATION_TO=${NOTIFICATION_TO:-dx@aozora-cg.com}"
+COMMON_ENV+=",OPENAI_API_KEY=${OPENAI_API_KEY:-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}"
+COMMON_ENV+=",SMARTHR_ACCESS_TOKEN=${SMARTHR_ACCESS_TOKEN:-shr_307f_kZFPn3MXM6QuLDShCev5sKusWMsPHzdM}"
+COMMON_ENV+=",KANAMICK_URL=${KANAMICK_URL:-https://portal.kanamic.net/tritrus/index/}"
+COMMON_ENV+=",KANAMICK_USERNAME=${KANAMICK_USERNAME:-ACGPdx@aozora-cg.com}"
+COMMON_ENV+=",KANAMICK_PASSWORD=${KANAMICK_PASSWORD:-Acgp2308!}"
 
-# 転記 Job 用の環境変数
-TRANSCRIPTION_ENV="${COMMON_ENV}"
-TRANSCRIPTION_ENV+=",KANAMICK_URL=${KANAMICK_URL:-}"
-TRANSCRIPTION_ENV+=",KANAMICK_USERNAME=${KANAMICK_USERNAME:-}"
-TRANSCRIPTION_ENV+=",KANAMICK_PASSWORD=${KANAMICK_PASSWORD:-}"
-TRANSCRIPTION_ENV+=",KANAMICK_STATION_NAME=訪問看護ステーションあおぞら姶良"
-TRANSCRIPTION_ENV+=",KANAMICK_HAM_OFFICE_KEY=6"
-TRANSCRIPTION_ENV+=",KANAMICK_HAM_OFFICE_CODE=400021814"
-TRANSCRIPTION_ENV+=",RUN_LOCATIONS=姶良"
-TRANSCRIPTION_ENV+=",OPENAI_API_KEY=${OPENAI_API_KEY:-}"
-TRANSCRIPTION_ENV+=",SMARTHR_ACCESS_TOKEN=${SMARTHR_ACCESS_TOKEN:-}"
+# === 4事業所の定義 ===
+# 配列: JOB名 | 事業所名 | RUN_LOCATIONS | stationName | hamOfficeCode | スケジュール時刻(JST)
+declare -a OFFICES=(
+  "tenki-transcription-aira|姶良|姶良|訪問看護ステーションあおぞら姶良|400021814|0 13 * * *"
+  "tenki-transcription-arata|荒田|荒田|訪問看護ステーションあおぞら荒田|109152|10 13 * * *"
+  "tenki-transcription-taniyama|谷山|谷山|訪問看護ステーションあおぞら谷山|400011055|20 13 * * *"
+  "tenki-transcription-fukuoka|福岡|福岡|訪問看護ステーションあおぞら福岡|103435|30 13 * * *"
+)
 
-# 同一建物データ取得 Job 用の環境変数
-BUILDING_DATA_ENV="${COMMON_ENV}"
-BUILDING_DATA_ENV+=",KINTONE_BASE_URL=${KINTONE_BASE_URL:-}"
-BUILDING_DATA_ENV+=",KINTONE_APP_197_TOKEN=${KINTONE_APP_197_TOKEN:-}"
-BUILDING_DATA_ENV+=",GH_SHEET_ID_KAGOSHIMA=${GH_SHEET_ID_KAGOSHIMA:-}"
-BUILDING_DATA_ENV+=",GH_SHEET_ID_FUKUOKA=${GH_SHEET_ID_FUKUOKA:-}"
-BUILDING_DATA_ENV+=",BUILDING_MGMT_SHEET_ID=18DueDsYPsNmePiYIp9hVpD1rIWWMCyPX5SdWzXOnZBY"
+# 同一建物データ取得 Job
+JOB_BUILDING_DATA="tenki-building-data"
 
 # ============================================================
 # 関数定義
@@ -65,45 +64,77 @@ build_image() {
   echo "=== ビルド完了: ${IMAGE} ==="
 }
 
-deploy_jobs() {
-  echo "=== Cloud Run Jobs デプロイ ==="
+deploy_transcription_job() {
+  local job_name="$1"
+  local location_label="$2"
+  local run_locations="$3"
+  local station_name="$4"
+  local ham_office_code="$5"
 
-  # --- 転記 Job ---
-  echo "--- ${JOB_TRANSCRIPTION} ---"
-  if gcloud run jobs describe "${JOB_TRANSCRIPTION}" --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
-    gcloud run jobs update "${JOB_TRANSCRIPTION}" \
+  local job_env="${COMMON_ENV}"
+  job_env+=",RUN_LOCATIONS=${run_locations}"
+  job_env+=",KANAMICK_STATION_NAME=${station_name}"
+  job_env+=",KANAMICK_HAM_OFFICE_KEY=6"
+  job_env+=",KANAMICK_HAM_OFFICE_CODE=${ham_office_code}"
+
+  echo "--- ${job_name} (${location_label}) ---"
+  if gcloud run jobs describe "${job_name}" --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
+    gcloud run jobs update "${job_name}" \
       --project="${PROJECT_ID}" \
       --region="${REGION}" \
       --image="${IMAGE}" \
       --command="node" \
       --args="dist/scripts/run-transcription.js" \
-      --set-env-vars="${TRANSCRIPTION_ENV}" \
-      --task-timeout=3600s \
+      --set-env-vars="${job_env}" \
+      --task-timeout=86400s \
       --max-retries=1 \
-      --memory=2Gi \
+      --memory=8Gi \
       --cpu=2 \
       --vpc-connector="${VPC_CONNECTOR}" \
       --vpc-egress=all-traffic \
-      --execute-now=false
+      --no-execute-now
   else
-    gcloud run jobs create "${JOB_TRANSCRIPTION}" \
+    gcloud run jobs create "${job_name}" \
       --project="${PROJECT_ID}" \
       --region="${REGION}" \
       --image="${IMAGE}" \
       --command="node" \
       --args="dist/scripts/run-transcription.js" \
-      --set-env-vars="${TRANSCRIPTION_ENV}" \
-      --task-timeout=3600s \
+      --set-env-vars="${job_env}" \
+      --task-timeout=86400s \
       --max-retries=1 \
-      --memory=2Gi \
+      --memory=8Gi \
       --cpu=2 \
       --service-account="${SA}" \
       --vpc-connector="${VPC_CONNECTOR}" \
       --vpc-egress=all-traffic
   fi
-  echo "--- ${JOB_TRANSCRIPTION} デプロイ完了 ---"
+  echo "--- ${job_name} (${location_label}) デプロイ完了 ---"
+}
+
+deploy_jobs() {
+  echo "=== Cloud Run Jobs デプロイ ==="
+
+  # --- 4事業所の転記 Job ---
+  for office in "${OFFICES[@]}"; do
+    IFS='|' read -r job_name location_label run_locations station_name ham_office_code _schedule <<< "${office}"
+    deploy_transcription_job "${job_name}" "${location_label}" "${run_locations}" "${station_name}" "${ham_office_code}"
+  done
+
+  # --- 旧 tenki-transcription Job を削除（姶良専用に置き換え済み） ---
+  if gcloud run jobs describe "tenki-transcription" --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
+    echo "--- 旧 tenki-transcription Job を検出。手動で削除してください:"
+    echo "    gcloud run jobs delete tenki-transcription --project=${PROJECT_ID} --region=${REGION}"
+  fi
 
   # --- 同一建物データ取得 Job ---
+  local building_env="${COMMON_ENV}"
+  building_env+=",KINTONE_BASE_URL=${KINTONE_BASE_URL:-}"
+  building_env+=",KINTONE_APP_197_TOKEN=${KINTONE_APP_197_TOKEN:-}"
+  building_env+=",GH_SHEET_ID_KAGOSHIMA=${GH_SHEET_ID_KAGOSHIMA:-}"
+  building_env+=",GH_SHEET_ID_FUKUOKA=${GH_SHEET_ID_FUKUOKA:-}"
+  building_env+=",BUILDING_MGMT_SHEET_ID=18DueDsYPsNmePiYIp9hVpD1rIWWMCyPX5SdWzXOnZBY"
+
   echo "--- ${JOB_BUILDING_DATA} ---"
   if gcloud run jobs describe "${JOB_BUILDING_DATA}" --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
     gcloud run jobs update "${JOB_BUILDING_DATA}" \
@@ -112,14 +143,14 @@ deploy_jobs() {
       --image="${IMAGE}" \
       --command="node" \
       --args="dist/scripts/run-building-data.js" \
-      --set-env-vars="${BUILDING_DATA_ENV}" \
+      --set-env-vars="${building_env}" \
       --task-timeout=1800s \
       --max-retries=1 \
       --memory=1Gi \
       --cpu=1 \
       --vpc-connector="${VPC_CONNECTOR}" \
       --vpc-egress=all-traffic \
-      --execute-now=false
+      --no-execute-now
   else
     gcloud run jobs create "${JOB_BUILDING_DATA}" \
       --project="${PROJECT_ID}" \
@@ -127,7 +158,7 @@ deploy_jobs() {
       --image="${IMAGE}" \
       --command="node" \
       --args="dist/scripts/run-building-data.js" \
-      --set-env-vars="${BUILDING_DATA_ENV}" \
+      --set-env-vars="${building_env}" \
       --task-timeout=1800s \
       --max-retries=1 \
       --memory=1Gi \
@@ -142,55 +173,66 @@ deploy_jobs() {
 deploy_scheduler() {
   echo "=== Cloud Scheduler デプロイ ==="
 
-  # --- 転記: 毎日 13:00 JST ---
-  SCHED_TRANSCRIPTION="tenki-transcription-daily"
-  JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_TRANSCRIPTION}:run"
+  # --- 4事業所の転記スケジューラー（1時間ずつずらす） ---
+  for office in "${OFFICES[@]}"; do
+    IFS='|' read -r job_name location_label _run_locations _station_name _ham_office_code schedule <<< "${office}"
 
-  if gcloud scheduler jobs describe "${SCHED_TRANSCRIPTION}" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
-    gcloud scheduler jobs update http "${SCHED_TRANSCRIPTION}" \
-      --project="${PROJECT_ID}" \
-      --location="${REGION}" \
-      --schedule="0 13 * * *" \
-      --time-zone="Asia/Tokyo" \
-      --uri="${JOB_URI}" \
-      --http-method=POST \
-      --oauth-service-account-email="${SA}"
-  else
-    gcloud scheduler jobs create http "${SCHED_TRANSCRIPTION}" \
-      --project="${PROJECT_ID}" \
-      --location="${REGION}" \
-      --schedule="0 13 * * *" \
-      --time-zone="Asia/Tokyo" \
-      --uri="${JOB_URI}" \
-      --http-method=POST \
-      --oauth-service-account-email="${SA}"
+    local sched_name="${job_name}-daily"
+    local job_uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${job_name}:run"
+
+    echo "--- ${sched_name} (${location_label}) ---"
+    if gcloud scheduler jobs describe "${sched_name}" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
+      gcloud scheduler jobs update http "${sched_name}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --schedule="${schedule}" \
+        --time-zone="Asia/Tokyo" \
+        --uri="${job_uri}" \
+        --http-method=POST \
+        --oauth-service-account-email="${SA}"
+    else
+      gcloud scheduler jobs create http "${sched_name}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --schedule="${schedule}" \
+        --time-zone="Asia/Tokyo" \
+        --uri="${job_uri}" \
+        --http-method=POST \
+        --oauth-service-account-email="${SA}"
+    fi
+    echo "--- ${sched_name}: ${schedule} JST (${location_label}) ---"
+  done
+
+  # --- 旧スケジューラーの通知 ---
+  if gcloud scheduler jobs describe "tenki-transcription-daily" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
+    echo "--- 旧 tenki-transcription-daily スケジューラーを検出。手動で削除してください:"
+    echo "    gcloud scheduler jobs delete tenki-transcription-daily --project=${PROJECT_ID} --location=${REGION}"
   fi
-  echo "--- ${SCHED_TRANSCRIPTION}: 毎日 13:00 JST ---"
 
   # --- 同一建物データ取得: 毎月3日 6:00 JST ---
-  SCHED_BUILDING_DATA="tenki-building-data-monthly"
-  JOB_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_BUILDING_DATA}:run"
+  local sched_building="tenki-building-data-monthly"
+  local building_uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${JOB_BUILDING_DATA}:run"
 
-  if gcloud scheduler jobs describe "${SCHED_BUILDING_DATA}" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
-    gcloud scheduler jobs update http "${SCHED_BUILDING_DATA}" \
+  if gcloud scheduler jobs describe "${sched_building}" --project="${PROJECT_ID}" --location="${REGION}" &>/dev/null; then
+    gcloud scheduler jobs update http "${sched_building}" \
       --project="${PROJECT_ID}" \
       --location="${REGION}" \
       --schedule="0 6 3 * *" \
       --time-zone="Asia/Tokyo" \
-      --uri="${JOB_URI}" \
+      --uri="${building_uri}" \
       --http-method=POST \
       --oauth-service-account-email="${SA}"
   else
-    gcloud scheduler jobs create http "${SCHED_BUILDING_DATA}" \
+    gcloud scheduler jobs create http "${sched_building}" \
       --project="${PROJECT_ID}" \
       --location="${REGION}" \
       --schedule="0 6 3 * *" \
       --time-zone="Asia/Tokyo" \
-      --uri="${JOB_URI}" \
+      --uri="${building_uri}" \
       --http-method=POST \
       --oauth-service-account-email="${SA}"
   fi
-  echo "--- ${SCHED_BUILDING_DATA}: 毎月3日 6:00 JST ---"
+  echo "--- ${sched_building}: 毎月3日 6:00 JST ---"
 }
 
 # ============================================================
@@ -221,10 +263,21 @@ esac
 
 echo ""
 echo "=== デプロイ完了 ==="
+echo ""
+echo "Cloud Run Jobs:"
+for office in "${OFFICES[@]}"; do
+  IFS='|' read -r job_name location_label _ _ _ schedule <<< "${office}"
+  echo "  ${job_name} (${location_label}) — ${schedule} JST"
+done
+echo "  ${JOB_BUILDING_DATA} — 毎月3日 6:00 JST"
+echo ""
 echo "確認コマンド:"
 echo "  gcloud run jobs list --project=${PROJECT_ID} --region=${REGION}"
 echo "  gcloud scheduler jobs list --project=${PROJECT_ID} --location=${REGION}"
 echo ""
 echo "手動実行:"
-echo "  gcloud run jobs execute ${JOB_TRANSCRIPTION} --project=${PROJECT_ID} --region=${REGION}"
+for office in "${OFFICES[@]}"; do
+  IFS='|' read -r job_name location_label _ _ _ _ <<< "${office}"
+  echo "  gcloud run jobs execute ${job_name} --project=${PROJECT_ID} --region=${REGION}  # ${location_label}"
+done
 echo "  gcloud run jobs execute ${JOB_BUILDING_DATA} --project=${PROJECT_ID} --region=${REGION}"
