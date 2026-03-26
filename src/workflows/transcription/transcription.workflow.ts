@@ -2654,9 +2654,34 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    */
   private async checkForSyserror(nav: HamNavigator): Promise<void> {
     try {
-      const allFrames = nav.hamPage.frames();
+      // Chrome OOM / クラッシュページ検出 → 自動リロードで復旧
+      const hamPage = nav.hamPage;
+      const hamUrl = hamPage.url();
+      if (hamUrl.startsWith('chrome-error://') || hamUrl === 'about:blank') {
+        logger.warn(`Chrome エラーページ検出 (${hamUrl}) → HAM ページをリロードします`);
+        await hamPage.reload({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+        await this.sleep(3000);
+        // リロード後もクラッシュしている場合は forceNavigateToMainMenu に任せる
+        const afterUrl = hamPage.url();
+        if (afterUrl.startsWith('chrome-error://') || afterUrl === 'about:blank') {
+          throw new Error(`HAM ページ復旧不可 (OOM): リロード後も ${afterUrl}`);
+        }
+        logger.info('Chrome エラーページからリロードで復旧成功');
+        return;
+      }
+
+      // フレーム内の OOM / chrome-error チェック
+      const allFrames = hamPage.frames();
       for (const frame of allFrames) {
         const url = frame.url();
+        if (url.startsWith('chrome-error://')) {
+          logger.warn(`フレーム内 Chrome エラー検出 → HAM ページをリロードします`);
+          await hamPage.reload({ waitUntil: 'load', timeout: 30000 }).catch(() => {});
+          await this.sleep(3000);
+          logger.info('フレーム Chrome エラーからリロードで復旧');
+          // リロード後は t1-2（メインメニュー）に戻るので、呼び出し元で再処理が必要
+          throw new Error('HAM フレームクラッシュ検出 — リロード済み、メインメニューから再開してください');
+        }
         if (url.includes('syserror.jsp') || url.includes('error/syserror')) {
           const content = await frame.evaluate(() => document.body?.innerText || '').catch(() => '');
           throw new Error(
@@ -2665,7 +2690,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         }
       }
     } catch (e) {
-      if ((e as Error).message.includes('syserror.jsp')) throw e;
+      if ((e as Error).message.includes('syserror.jsp') ||
+          (e as Error).message.includes('OOM') ||
+          (e as Error).message.includes('クラッシュ')) throw e;
       // フレームアクセスエラーは無視
     }
   }
