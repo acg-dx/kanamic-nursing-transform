@@ -3,6 +3,7 @@ import { logger } from '../core/logger';
 import { HamNavigator } from '../core/ham-navigator';
 import { withRetry } from '../core/retry-manager';
 import type { BrowserManager } from '../core/browser-manager';
+import { PAGE_DEATH_KEYWORDS } from '../core/ham-error-keywords';
 
 export interface KanamickAuthConfig {
   /** TRITRUS ポータル URL (e.g. https://portal.kanamic.net/tritrus/index/) */
@@ -73,6 +74,149 @@ export class KanamickAuthService {
     return true;
   }
 
+  /**
+   * いずれかのページが死亡/OOM 状態なら、ブラウザを丸ごと再起動する。
+   *
+   * 個別ページの修復は複雑でエッジケースが多いため、
+   * 死亡ページを検出した時点でクリーンな状態に戻す方が確実。
+   * @returns true if relaunch was performed
+   */
+  private async relaunchIfAnyPageDead(): Promise<boolean> {
+    if (!this.browserManager) return false;
+    if (!this.context) return false;
+
+    const oomKeywords = PAGE_DEATH_KEYWORDS;
+
+    let hasDead = false;
+    let deadReason = '';
+    const EVAL_TIMEOUT = 5000; // 5秒タイムアウト（OOM ページでは evaluate がハングするため）
+    const pages = this.context.pages();
+
+    // ページが0件 = コンテキスト/ブラウザが完全にクラッシュしている可能性が高い
+    if (pages.length === 0) {
+      hasDead = true;
+      deadReason = 'context にページが存在しない（クラッシュ後の可能性）';
+    }
+
+    for (const p of pages) {
+      try {
+        // URL チェック（同期的、ハングしない）
+        const url = (() => { try { return p.url(); } catch { return ''; } })();
+        if (url.startsWith('chrome-error://') || url === 'about:blank') {
+          hasDead = true; deadReason = `${url}`; break;
+        }
+
+        // evaluate は OOM 時にハングするため、短いタイムアウトで保護
+        const alive = await Promise.race([
+          p.evaluate(() => true).catch(() => false),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), EVAL_TIMEOUT)),
+        ]);
+        if (!alive) { hasDead = true; deadReason = `evaluate タイムアウト/失敗 (${url})`; break; }
+
+        // 生きていても OOM/エラー状態かチェック
+        const hasError = p.frames().some(f => f.url().startsWith('chrome-error://'));
+        if (hasError) { hasDead = true; deadReason = `chrome-error:// フレーム (${url})`; break; }
+
+        // body text チェック（OOM キーワード検出）
+        // Chrome OOM ページは Shadow DOM を使用するため innerText が空になる場合がある。
+        // document.title + 全テキストコンテンツを取得して確認する。
+        const bodyText = await Promise.race([
+          p.evaluate(() => {
+            const title = document.title || '';
+            const inner = document.body?.innerText || '';
+            // Chrome のエラーページは interstitial-wrapper 内に実テキストがある
+            const errorDiv = document.querySelector('#main-frame-error')
+              || document.querySelector('.interstitial-wrapper')
+              || document.querySelector('[jstcache]');
+            const errorText = errorDiv?.textContent || '';
+            return `${title}\n${inner}\n${errorText}`;
+          }).catch(() => '__EVAL_FAILED__'),
+          new Promise<string>(resolve => setTimeout(() => resolve('__EVAL_TIMEOUT__'), EVAL_TIMEOUT)),
+        ]);
+        if (bodyText === '__EVAL_FAILED__' || bodyText === '__EVAL_TIMEOUT__') {
+          hasDead = true; deadReason = `body evaluate ${bodyText === '__EVAL_TIMEOUT__' ? 'タイムアウト' : '失敗'} (${url})`; break;
+        }
+        const foundKw = oomKeywords.find(kw => bodyText.includes(kw));
+        if (foundKw) { hasDead = true; deadReason = `"${foundKw}" 検出 (${url})`; break; }
+        // Chrome エラーページ追加検出: body がほぼ空 + title にエラーキーワード
+        if (bodyText.replace(/\s/g, '').length < 20) {
+          // ページ内容がほぼ空 = Chrome エラーページか白屏（正常な HAM ページは必ず内容がある）
+          const titleLower = (bodyText.split('\n')[0] || '').toLowerCase();
+          if (titleLower.includes('error') || titleLower.includes('エラー') || titleLower === '') {
+            hasDead = true; deadReason = `空ページ検出 (title="${bodyText.split('\\n')[0]}", url=${url})`; break;
+          }
+        }
+      } catch (e) {
+        hasDead = true;
+        const safeUrl = (() => { try { return p.url().substring(0, 80); } catch { return 'URL取得不可'; } })();
+        deadReason = `evaluate 失敗: ${(e as Error).message?.substring(0, 60)} (${safeUrl})`;
+        break;
+      }
+    }
+
+    // === HAM フレーム応答チェック ===
+    // 顶层 hamfromout.go (frameset) は alive でも、内部 frame が全滅の場合がある
+    if (!hasDead) {
+      const hamPage = pages.find(p => {
+        try { return p.url().includes('kanamic.net'); } catch { return false; }
+      });
+      if (hamPage) {
+        try {
+          const allFrames = hamPage.frames();
+          const actionFrame = allFrames.find(f =>
+            f.url().includes('Action.go') || f.url().includes('goPageAction.go')
+          );
+          if (actionFrame) {
+            const EVAL_TIMEOUT = 5000;
+            const frameAlive = await Promise.race([
+              actionFrame.evaluate(() => true).catch(() => false),
+              new Promise<false>(resolve => setTimeout(() => resolve(false), EVAL_TIMEOUT)),
+            ]);
+            if (!frameAlive) {
+              hasDead = true;
+              deadReason = `HAM mainFrame 応答なし (${actionFrame.url().substring(0, 80)})`;
+            }
+          } else {
+            // kanamicmain は存在するが子フレーム応答なし = フレーム構造崩壊
+            const kanamicmain = hamPage.frame('kanamicmain');
+            if (kanamicmain) {
+              const childFrames = kanamicmain.childFrames();
+              if (childFrames.length === 0) {
+                hasDead = true;
+                deadReason = 'HAM kanamicmain に子フレームなし（フレーム構造崩壊）';
+              } else {
+                const EVAL_TIMEOUT = 5000;
+                let anyAlive = false;
+                for (const cf of childFrames) {
+                  const a = await Promise.race([
+                    cf.evaluate(() => true).catch(() => false),
+                    new Promise<false>(resolve => setTimeout(() => resolve(false), EVAL_TIMEOUT)),
+                  ]);
+                  if (a) { anyAlive = true; break; }
+                }
+                if (!anyAlive) {
+                  hasDead = true;
+                  deadReason = 'HAM 全子フレーム応答なし';
+                }
+              }
+            }
+          }
+        } catch {
+          // フレーム検査自体の失敗は無視
+        }
+      }
+    }
+
+    if (!hasDead) return false;
+
+    logger.warn(`ページ死亡/OOM を検出 — ブラウザを再起動します (理由: ${deadReason})`);
+    await this.browserManager.relaunch();
+    this.context = this.browserManager.browserContext;
+    this._navigator = new HamNavigator(this.context);
+    this.isLoggedIn = false;
+    return true;
+  }
+
   get navigator(): HamNavigator {
     if (!this._navigator) throw new Error('BrowserContext が未設定です。setContext() を呼んでください');
     return this._navigator;
@@ -85,9 +229,13 @@ export class KanamickAuthService {
     return pages[0];
   }
 
-  /** ページがなければ作成。コンテキスト死亡時は自動再起動 */
+  /** ページがなければ作成。死亡時はブラウザ再起動。 */
   private async ensurePage(): Promise<Page> {
     if (!this.context) throw new Error('BrowserContext が未設定です');
+
+    // ページ死亡/OOM を検出したらブラウザ丸ごと再起動
+    await this.relaunchIfAnyPageDead();
+    if (!this.context) throw new Error('relaunch 後に BrowserContext が未設定です');
 
     try {
       const pages = this.context.pages();
@@ -96,7 +244,20 @@ export class KanamickAuthService {
     } catch (err) {
       const msg = (err as Error).message;
       if (msg.includes('has been closed') || msg.includes('Target closed')) {
-        // BrowserContext 自体が死んでいる → 再起動を試行
+        // isContextAlive() は browser.isConnected() に依存するが、ブラウザクラッシュ直後は
+        // 非同期の切断イベントが届く前に isConnected()=true のまま newPage() が失敗する
+        // 競態条件がある。そのため isContextAlive() を信頼せず、強制的に再起動する。
+        if (this.browserManager) {
+          logger.warn('context.newPage() 失敗 (has been closed) — 強制ブラウザ再起動');
+          await this.browserManager.relaunch();
+          this.context = this.browserManager.browserContext;
+          this._navigator = new HamNavigator(this.context);
+          this.isLoggedIn = false;
+          const pages = this.context.pages();
+          if (pages.length > 0) return pages[0];
+          return await this.context.newPage();
+        }
+        // browserManager がない場合は従来の検出ロジックにフォールバック
         const relaunched = await this.relaunchIfContextDead();
         if (relaunched && this.context) {
           const pages = this.context.pages();
@@ -265,7 +426,7 @@ export class KanamickAuthService {
 
         // フレーム構造安定待ち (kanamicmain → topFrame + mainFrame)
         await this.sleep(2000);
-        await hamPage.waitForLoadState('load').catch(() => {});
+        await hamPage.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
 
         // HamNavigator 更新
         this.navigator.refreshHamPage();
@@ -299,6 +460,15 @@ export class KanamickAuthService {
     // BrowserContext が死んでいる場合は再起動してから再ログイン
     await this.relaunchIfContextDead();
 
+    // ★ 全ページの死活チェック（OOM 含む）を最初に実行
+    // evaluate(() => true) の失敗で確実に検出する（.catch(() => '') による誤検出回避）
+    const relaunched = await this.relaunchIfAnyPageDead();
+    if (relaunched) {
+      logger.warn('ensureLoggedIn: ページ死亡/OOM を検出 — ブラウザ再起動 → 再ログイン');
+      this.isLoggedIn = false;
+      return this.login();
+    }
+
     if (!this.isLoggedIn) {
       return this.login();
     }
@@ -322,41 +492,19 @@ export class KanamickAuthService {
         return this.login();
       }
 
-      // HAM サーバー側エラー（メモリ不足、ページ開けない等）を検出
-      // 長時間セッションで HAM がリソース不足になった場合に発生する
-      const pageContent = await hamPage.evaluate(() => document.body?.innerText || '').catch(() => '');
-      const hamServerError = ['メモリが不足している', 'このページを開けません', 'Out of Memory',
-        'サーバーエラー', '一時的に利用できません',
-        'E00010', '502 Bad Gateway', '503 Service', 'Internal Server Error'];
-      const detectedError = hamServerError.find(keyword => pageContent.includes(keyword));
-      if (detectedError) {
-        logger.warn(`HAM サーバーエラー検出: "${detectedError}" — ページリロード後に再ログイン...`);
-        await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-        this.isLoggedIn = false;
-        return this.login();
-      }
-
-      // フレーム内のエラー検出（syserror、メモリ不足ページ等）
+      // フレーム内のエラー検出（syserror）
       for (const frame of frames) {
         const frameUrl = frame.url();
         if (frameUrl.includes('syserror') || frameUrl.includes('error/')) {
-          logger.warn(`HAM フレームにエラーページ検出: ${frameUrl} — ページリロード後に再ログイン...`);
-          await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-          this.isLoggedIn = false;
-          return this.login();
-        }
-        // フレーム内のメモリ不足/OOM エラーページ検出
-        const frameContent = await frame.evaluate(() => document.body?.innerText || '').catch(() => '');
-        const frameError = hamServerError.find(keyword => frameContent.includes(keyword));
-        if (frameError) {
-          logger.warn(`HAM フレーム内エラー検出: "${frameError}" — ページリロード後に再ログイン...`);
-          await hamPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          logger.warn(`HAM フレームにエラーページ検出: ${frameUrl} — 再ログイン...`);
+          await this.relaunchIfAnyPageDead();
           this.isLoggedIn = false;
           return this.login();
         }
       }
     } catch {
-      logger.info('HAM ページアクセスエラー、再ログイン...');
+      logger.info('HAM ページアクセスエラー — 死亡ページを閉じて再ログイン...');
+      await this.relaunchIfAnyPageDead();
       this.isLoggedIn = false;
       return this.login();
     }
@@ -486,7 +634,7 @@ export class KanamickAuthService {
               if (frame) frame.src = url;
             }, t12Url);
             await this.sleep(3000);
-            await hamPage.waitForLoadState('load').catch(() => {});
+            await hamPage.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
             const pageId = await nav.getCurrentPageId();
             if (pageId === 't1-2') {
               logger.info('forceNavigateToMainMenu: 強制復帰成功');
@@ -529,11 +677,11 @@ export class KanamickAuthService {
         logger.warn(`forceNavigateToMainMenu: 方法3(再ナビゲート) 失敗: ${(e3 as Error).message}`);
       }
 
-      // 方法4: 完全再ログイン（最終手段）
-      // まず BrowserContext 死亡を検出 → ブラウザ再起動
-      const relaunched = await this.relaunchIfContextDead();
-      if (relaunched) {
-        logger.info('forceNavigateToMainMenu: ブラウザ再起動済み — 再ログインへ');
+      // 方法4: ブラウザ再起動 + 完全再ログイン（最終手段）
+      // BrowserContext 死亡 or ページ死亡/OOM → ブラウザ丸ごと再起動してクリーンな状態に
+      const contextRelaunched = await this.relaunchIfContextDead();
+      if (!contextRelaunched) {
+        await this.relaunchIfAnyPageDead();
       }
 
       // ERR_CONNECTION_RESET の場合、サーバー復旧を待つためにバックオフ付きリトライ
@@ -543,8 +691,11 @@ export class KanamickAuthService {
         logger.error(`forceNavigateToMainMenu: 全方法失敗 — 再ログインを試行 (${attempt}/${MAX_RELOGIN_ATTEMPTS}, ${backoffSec}秒待機)`);
         await this.sleep(backoffSec * 1000);
 
-        // 各リトライでもコンテキスト死亡チェック
-        await this.relaunchIfContextDead();
+        // 各リトライでもブラウザ状態チェック
+        const retryRelaunched = await this.relaunchIfContextDead();
+        if (!retryRelaunched) {
+          await this.relaunchIfAnyPageDead();
+        }
 
         this.isLoggedIn = false;
         try {

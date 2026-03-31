@@ -21,7 +21,9 @@ import { logger } from '../../core/logger';
 import { withRetry } from '../../core/retry-manager';
 import { CJK_VARIANT_MAP_SERIALIZABLE, extractPlainName } from '../../core/cjk-normalize';
 import { toHamDate, toHamMonthStart } from '../../services/time-utils';
+import { PAGE_DEATH_KEYWORDS, isPageCrashError } from '../../core/ham-error-keywords';
 import type { HamNavigator } from '../../core/ham-navigator';
+import type { Page } from 'playwright';
 import type { WorkflowContext, WorkflowResult, WorkflowError } from '../../types/workflow.types';
 import type { DeletionRecord, TranscriptionRecord } from '../../types/spreadsheet.types';
 import type { SheetLocation } from '../../types/config.types';
@@ -72,7 +74,7 @@ export class DeletionWorkflow extends BaseWorkflow {
     }
 
     // HAM にログイン
-    const nav = await this.auth.ensureLoggedIn();
+    let nav = await this.auth.ensureLoggedIn();
 
     // 月次Sheet から recordId → HAM assignId マップ＋転記済みレコードID集合を構築
     const { assignIds: assignIdMap, registeredIds } = await this.sheets.getAssignIdMap(location.sheetId);
@@ -103,7 +105,33 @@ export class DeletionWorkflow extends BaseWorkflow {
         await withRetry(
           () => this.processRecord(record, nav, location.sheetId, storedAssignId, isRegistered, duplicatePairMap),
           `削除[${record.recordId}]`,
-          { maxAttempts: 3, baseDelay: 2000, maxDelay: 10000, backoffMultiplier: 2 }
+          {
+            maxAttempts: 3,
+            baseDelay: 2000,
+            maxDelay: 10000,
+            backoffMultiplier: 2,
+            onRetry: async (_attempt, _err) => {
+              const errMsg = _err?.message || '';
+              const isServerError = ['メモリ不足', 'Out of Memory', 'OOM',
+                'サーバーエラー', 'syserror', 'chrome-error',
+                'Target crashed', 'Page crashed', 'ページ死亡検出',
+                'ページ応答なし', 'ページクラッシュ検出', 'ブラウザ再起動',
+                'Session closed', 'browser has been closed',
+              ].some(k => errMsg.includes(k));
+
+              if (isServerError) {
+                const waitSec = 10 * _attempt;
+                logger.warn(`削除: サーバーエラー検出 — ${waitSec}秒待機後にリトライ: ${errMsg.substring(0, 100)}`);
+                await this.sleep(waitSec * 1000);
+              }
+
+              logger.info('削除: ページ復旧 → ensureLoggedIn → 利用者検索まで再遷移');
+              nav = await this.auth.ensureLoggedIn();
+              await this.auth.navigateToMainMenu();
+              await this.auth.navigateToBusinessGuide();
+              await this.auth.navigateToUserSearch();
+            },
+          }
         );
         processedRecords++;
       } catch (error) {
@@ -124,7 +152,7 @@ export class DeletionWorkflow extends BaseWorkflow {
         logger.error(`削除エラー [${record.recordId}]: ${err.message}`);
 
         // エラー後にメインメニューへ復帰を試みる
-        await this.tryRecoverToMainMenu(nav);
+        nav = await this.tryRecoverToMainMenu(nav);
       }
     }
 
@@ -586,12 +614,18 @@ export class DeletionWorkflow extends BaseWorkflow {
         return null;
       }
 
-      // NFKC + 旧字体→新字体（眞→真 等）で正規化
+      // NFKC + Variation Selector 除去 + 旧字体→新字体（眞→真 等）+ ひらがな→カタカナ統一
       function normalize(s: string): string {
         let r = s.normalize('NFKC');
+        r = r.replace(/[\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g, '');
+        r = r.replace(/[\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g, '');
         for (const [old, rep] of args.variantMap) {
           if (r.includes(old)) r = r.replaceAll(old, rep);
         }
+        // ひらがな → カタカナ統一
+        r = r.replace(/[\u3041-\u3096]/g, ch => String.fromCharCode(ch.charCodeAt(0) + 0x60));
+        r = r.replace(/\u30F2/g, '\u30AA'); // ヲ→オ
+        r = r.replace(/\u30F1/g, '\u30A8'); // ヱ→エ
         return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
       }
 
@@ -631,29 +665,79 @@ export class DeletionWorkflow extends BaseWorkflow {
   }
 
   /**
-   * syserror.jsp が表示されていないかチェック
+   * 全ページ死活チェック + syserror/OOM 検出。
+   * 転記ワークフローと同等の検出力を持つ。
    */
   private async checkForSyserror(nav: HamNavigator): Promise<void> {
     try {
-      const allFrames = nav.hamPage.frames();
+      // === 全ページ死活チェック（TRITRUS + HAM 両方） ===
+      const pagesToCheck: Array<{ page: Page; label: string }> = [];
+      try { pagesToCheck.push({ page: nav.tritrusPage, label: 'TRITRUS' }); } catch { /* not available */ }
+      try { pagesToCheck.push({ page: nav.hamPage, label: 'HAM' }); } catch { /* not available */ }
+      const EVAL_TIMEOUT = 5000; // 5秒タイムアウト（OOM ページでは evaluate がハングするため）
+      for (const { page: p, label } of pagesToCheck) {
+        const pUrl = (() => { try { return p.url(); } catch { return ''; } })();
+        if (pUrl.startsWith('chrome-error://') || pUrl === 'about:blank') {
+          throw new Error(`ページ死亡検出 (OOM): ${label} が ${pUrl} — ブラウザ再起動が必要です`);
+        }
+        const alive = await Promise.race([
+          p.evaluate(() => true).catch(() => false),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), EVAL_TIMEOUT)),
+        ]);
+        if (!alive) {
+          throw new Error(`ページ応答なし (OOM): ${label} ${pUrl} — ブラウザ再起動が必要です`);
+        }
+        const bodyText = await Promise.race([
+          p.evaluate(() => document.body?.innerText || '').catch(() => '__EVAL_FAILED__'),
+          new Promise<string>(resolve => setTimeout(() => resolve('__EVAL_TIMEOUT__'), EVAL_TIMEOUT)),
+        ]);
+        if (bodyText === '__EVAL_FAILED__' || bodyText === '__EVAL_TIMEOUT__') {
+          throw new Error(`ページ応答異常 (OOM): ${label} body取得${bodyText === '__EVAL_TIMEOUT__' ? 'タイムアウト' : '失敗'} ${pUrl} — ブラウザ再起動が必要です`);
+        }
+        const oomHit = PAGE_DEATH_KEYWORDS.find(kw => bodyText.includes(kw));
+        if (oomHit) {
+          throw new Error(`ページ死亡検出 (OOM): ${label} に "${oomHit}" — ブラウザ再起動が必要です`);
+        }
+      }
+
+      // === フレーム内 syserror/OOM チェック ===
+      const hamPage = nav.hamPage;
+      const allFrames = hamPage.frames();
       for (const frame of allFrames) {
         const url = frame.url();
+        if (url.startsWith('chrome-error://')) {
+          throw new Error('HAM フレームクラッシュ検出 — ブラウザ再起動が必要です');
+        }
         if (url.includes('syserror.jsp') || url.includes('error/syserror')) {
           const content = await frame.evaluate(() => document.body?.innerText || '').catch(() => '');
           throw new Error(
             `HAM システムエラー検出 (syserror.jsp): ${content.substring(0, 200)}`
           );
         }
+        const frameText = await frame.evaluate(() => document.body?.innerText || '').catch(() => '');
+        const oomMatch = PAGE_DEATH_KEYWORDS.find(k => frameText.includes(k));
+        if (oomMatch) {
+          throw new Error(`HAM フレーム内 OOM 検出: "${oomMatch}" — ブラウザ再起動が必要です`);
+        }
       }
     } catch (e) {
-      if ((e as Error).message.includes('syserror.jsp')) throw e;
+      const msg = (e as Error).message;
+      const isOwnError = msg.includes('syserror.jsp') ||
+        msg.includes('OOM') ||
+        msg.includes('クラッシュ') ||
+        PAGE_DEATH_KEYWORDS.some(kw => msg.includes(kw));
+      if (isOwnError) throw e;
+      if (isPageCrashError(msg)) {
+        throw new Error(`ページクラッシュ検出 (OOM): ${msg}`);
+      }
+      // フレームアクセスエラー（遷移中等）は無視
     }
   }
 
   /**
    * エラー後にメインメニューへ復帰を試みる
    */
-  private async tryRecoverToMainMenu(nav: HamNavigator): Promise<void> {
+  private async tryRecoverToMainMenu(nav: HamNavigator): Promise<HamNavigator> {
     try {
       const allFrames = nav.hamPage.frames();
       for (const frame of allFrames) {
@@ -676,11 +760,12 @@ export class DeletionWorkflow extends BaseWorkflow {
     } catch {
       logger.warn('メインメニューへの復帰に失敗。次のレコードで再ログインを試みます');
       try {
-        await this.auth.ensureLoggedIn();
+        nav = await this.auth.ensureLoggedIn();
       } catch {
         logger.error('再ログインにも失敗');
       }
     }
+    return nav;
   }
 
   /**

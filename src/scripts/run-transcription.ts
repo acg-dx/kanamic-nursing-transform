@@ -47,6 +47,7 @@ import { NotificationService } from '../services/notification.service';
 import type { WorkflowContext } from '../types/workflow.types';
 import type { NotificationConfig, DailyReport } from '../types/notification.types';
 import type { WorkflowResult } from '../types/workflow.types';
+import { extractPlainName, resolveStaffAlias, STAFF_EMPCODE_OVERRIDES } from '../core/cjk-normalize';
 
 /** 通知サービス（main 内外で共有） */
 function createNotificationService(): NotificationService {
@@ -121,6 +122,51 @@ async function sendErrorNotification(errorMessage: string): Promise<void> {
 /** デフォルト CSV ファイルパス（現在の年月で自動生成） */
 const DEFAULT_CSV = `./4664590280_userallfull_${PatientCsvDownloaderService.getCurrentMonth()}.csv`;
 
+/**
+ * タブ名（YYYY年MM月）をパースして { year, month } を返す
+ */
+function parseTab(tab: string): { year: number; month: number } {
+  const m = tab.match(/^(\d{4})年(\d{2})月$/);
+  if (!m) throw new Error(`無効なタブ形式: ${tab} (期待: YYYY年MM月)`);
+  return { year: parseInt(m[1], 10), month: parseInt(m[2], 10) };
+}
+
+/**
+ * { year, month } → タブ名（YYYY年MM月）
+ */
+function formatTab(year: number, month: number): string {
+  return `${year}年${String(month).padStart(2, '0')}月`;
+}
+
+/**
+ * 現在の月のタブ名を返す
+ */
+function currentMonthTab(): string {
+  const now = new Date();
+  return formatTab(now.getFullYear(), now.getMonth() + 1);
+}
+
+/**
+ * START_FROM_TAB から当月までのタブ一覧を生成
+ * 例: START_FROM_TAB=2026年03月, 現在=2026年04月 → ['2026年03月', '2026年04月']
+ */
+function buildTargetTabs(startFrom: string): string[] {
+  const start = parseTab(startFrom);
+  const now = new Date();
+  const endYear = now.getFullYear();
+  const endMonth = now.getMonth() + 1;
+
+  const tabs: string[] = [];
+  let y = start.year;
+  let m = start.month;
+  while (y < endYear || (y === endYear && m <= endMonth)) {
+    tabs.push(formatTab(y, m));
+    m++;
+    if (m > 12) { m = 1; y++; }
+  }
+  return tabs;
+}
+
 async function main(): Promise<void> {
   // コマンドライン引数
   const args = process.argv.slice(2);
@@ -128,10 +174,23 @@ async function main(): Promise<void> {
   const explicitCsv = args.find(a => a.startsWith('--csv='))?.split('=')[1];
   const limitArg = args.find(a => a.startsWith('--limit='))?.split('=')[1];
   const limit = limitArg ? parseInt(limitArg, 10) : 0;
-  const tabArg = args.find(a => a.startsWith('--tab='))?.split('=')[1] || undefined;
+  const tabArg = args.find(a => a.startsWith('--tab='))?.split('=')[1]
+    || process.env.TARGET_TAB
+    || undefined;
+  const startFromTab = args.find(a => a.startsWith('--start-from='))?.split('=')[1]
+    || process.env.START_FROM_TAB
+    || undefined;
   const csvMode = explicitCsv ? 'local' : 'auto';
   const config = loadConfig();
   const locations = config.sheets.locations;
+
+  // 処理対象タブを決定
+  // 優先順位: --tab (単一月固定) > --start-from / START_FROM_TAB (範囲) > 当月のみ
+  const targetTabs: string[] = tabArg
+    ? [tabArg]
+    : startFromTab
+      ? buildTargetTabs(startFromTab)
+      : [currentMonthTab()];
 
   if (locations.length === 0) {
     throw new Error('処理対象の事業所が設定されていません（config.sheets.locations）');
@@ -141,9 +200,9 @@ async function main(): Promise<void> {
   logger.info('  転記実行');
   logger.info(`  対象事業所: ${locations.map(loc => loc.name).join(', ')}`);
   logger.info(`  事業所数: ${locations.length}`);
+  logger.info(`  対象タブ: ${targetTabs.join(' → ')}`);
   logger.info(`  CSV モード: ${csvMode === 'local' ? `ローカル (${explicitCsv})` : 'HAM 自動ダウンロード'}`);
   logger.info(`  ドライラン: ${dryRun}`);
-  if (tabArg) logger.info(`  対象タブ: ${tabArg}`);
   if (limit > 0) logger.info(`  レコード上限: ${limit}`);
   logger.info('========================================');
 
@@ -200,34 +259,7 @@ async function main(): Promise<void> {
         hamOfficeKey: '6',
         hamOfficeCode: loc.hamOfficeCode,
       });
-      auth.setContext(browser.browserContext);
-
-      // === Step 0.5: SmartHR からスタッフ資格マップ構築（事業所ごと） ===
-      // 注意: 部署フィルタは使わない。Sheet 内の全スタッフを emp_code で直接検索する。
-      // SmartHR は資格情報の参照元であり、部署に関係なく全スタッフの資格が必要。
-      const staffQualifications = new Map<string, string[]>();
-      if (smarthr) {
-        const sheetRecords = await sheets.getTranscriptionRecords(loc.sheetId, tabArg);
-        const empCodes = [...new Set(sheetRecords.map(r => r.staffNumber).filter(Boolean))];
-        logger.info(`[${loc.name}] Sheet 内ユニークスタッフ: ${empCodes.length}名 → SmartHR で資格検索`);
-
-        if (empCodes.length > 0) {
-          const crewMap = await smarthr.getCrewsByEmpCodes(empCodes);
-          logger.info(`[${loc.name}] SmartHR 検索結果: ${crewMap.size}/${empCodes.length}名`);
-
-          for (const [, crew] of crewMap) {
-            const entry = smarthr.toStaffMasterEntry(crew);
-            if (entry.staffName && entry.qualifications.length > 0) {
-              staffQualifications.set(entry.staffName, entry.qualifications);
-            }
-          }
-        }
-
-        logger.info(`[${loc.name}] スタッフ資格マップ: ${staffQualifications.size}名分構築完了`);
-        for (const [name, quals] of staffQualifications) {
-          logger.debug(`  ${name}: [${quals.join(', ')}]`);
-        }
-      }
+      auth.setContext(browser.browserContext, browser);
 
       // === Step 0: 利用者マスタ CSV（事業所ごと） ===
       const patientMaster = new PatientMasterService();
@@ -260,8 +292,12 @@ async function main(): Promise<void> {
       // === 事業所ごと HAM ログイン ===
       await auth.login();
 
-      // === 前月未登録チェック → 未登録があれば前月を先に転記 ===
-      if (!tabArg) {
+      // === 前月未登録チェック（START_FROM_TAB 未使用 & TARGET_TAB 未使用の場合のみ） ===
+      const skipPrevMonth = process.env.SKIP_PREV_MONTH === 'true' || startFromTab !== undefined;
+      if (skipPrevMonth) {
+        logger.info(`[${loc.name}] 前月チェックをスキップ（${startFromTab ? 'START_FROM_TAB で範囲指定中' : 'SKIP_PREV_MONTH=true'}）`);
+      }
+      if (!tabArg && !startFromTab && !skipPrevMonth) {
         try {
           const reconciliation = new ReconciliationService(sheets);
           const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
@@ -271,9 +307,25 @@ async function main(): Promise<void> {
             const prevTab = `${prev.getFullYear()}年${String(prev.getMonth() + 1).padStart(2, '0')}月`;
             logger.warn(`[${loc.name}] 前月(${prevTab})に未登録レコード ${prevResult.pendingCount} 件を検出 → 前月を先に転記します`);
 
+            // 前月用スタッフ資格マップ
+            const prevStaffQualifications = new Map<string, string[]>();
+            if (smarthr) {
+              const sheetRecords = await sheets.getTranscriptionRecords(loc.sheetId, prevTab);
+              const empCodes = [...new Set(sheetRecords.map(r => r.staffNumber).filter(Boolean))];
+              if (empCodes.length > 0) {
+                const crewMap = await smarthr.getCrewsByEmpCodes(empCodes);
+                for (const [, crew] of crewMap) {
+                  const entry = smarthr.toStaffMasterEntry(crew);
+                  if (entry.staffName && entry.qualifications.length > 0) {
+                    prevStaffQualifications.set(entry.staffName, entry.qualifications);
+                  }
+                }
+              }
+            }
+
             const prevWorkflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
             prevWorkflow.setPatientMaster(patientMaster);
-            prevWorkflow.setStaffQualifications(staffQualifications);
+            prevWorkflow.setStaffQualifications(prevStaffQualifications);
             if (smarthr) {
               prevWorkflow.setStaffAutoRegister(smarthr);
             }
@@ -297,53 +349,108 @@ async function main(): Promise<void> {
         }
       }
 
-      // ワークフロー作成 + マスタ設定
-      const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
-      workflow.setPatientMaster(patientMaster);
-      workflow.setStaffQualifications(staffQualifications);
+      // === 各対象月タブを順番に転記 ===
+      for (const currentTab of targetTabs) {
+        logger.info(`[${loc.name}] === タブ: ${currentTab} 転記開始 ===`);
 
-      // SmartHR 自動補登を有効化（部署を問わず Sheet スタッフを登録）
-      if (smarthr) {
-        const staffSync = new StaffSyncService(smarthr, auth, {
-          cd: loc.tritrusOfficeCd,  // TRITRUS 事業所コード（Phase2 事業所設定で使用）
-          name: loc.stationName,
-        });
-        workflow.setStaffAutoRegister(smarthr, staffSync);
-        logger.info(`[${loc.name}] スタッフ自動補登: 有効（SmartHR 経由, 事業所=${loc.stationName}）`);
-      }
+        // SmartHR からスタッフ資格マップ構築（タブごと）
+        const staffQualifications = new Map<string, string[]>();
+        if (smarthr) {
+          const sheetRecords = await sheets.getTranscriptionRecords(loc.sheetId, currentTab);
+          const empCodes = [...new Set(sheetRecords.map(r => r.staffNumber).filter(Boolean))];
+          logger.info(`[${loc.name}][${currentTab}] Sheet 内ユニークスタッフ: ${empCodes.length}名 → SmartHR で資格検索`);
 
-      // コンテキスト作成
-      const context: WorkflowContext = {
-        workflowName: 'transcription',
-        startedAt: new Date(),
-        dryRun,
-        locations: [loc],
-        tab: tabArg,
-      };
+          if (empCodes.length > 0) {
+            const crewMap = await smarthr.getCrewsByEmpCodes(empCodes);
+            logger.info(`[${loc.name}][${currentTab}] SmartHR 検索結果: ${crewMap.size}/${empCodes.length}名`);
 
-      // 転記実行
-      const startTime = Date.now();
-      const results = await workflow.run(context);
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
-      allResults.push(...results);
+            for (const [, crew] of crewMap) {
+              const entry = smarthr.toStaffMasterEntry(crew);
+              if (entry.staffName && entry.qualifications.length > 0) {
+                staffQualifications.set(entry.staffName, entry.qualifications);
+              }
+            }
+          }
 
-      // 結果レポート（事業所単位）
-      const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
-      const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
-      const totalRecords = results.reduce((sum, r) => sum + r.totalRecords, 0);
-      logger.info(`[${loc.name}] 転記結果: 対象=${totalRecords}, 完了=${totalProcessed}, エラー=${totalErrors}, 所要=${elapsed}秒`);
+          // emp_code 上書き対象のスタッフを補完検索
+          const overrideEmpCodes: string[] = [];
+          for (const r of sheetRecords) {
+            const plainName = extractPlainName(r.staffName).replace(/[\s\u3000\u00a0]+/g, '');
+            const override = STAFF_EMPCODE_OVERRIDES[plainName];
+            if (override && !empCodes.includes(override)) {
+              overrideEmpCodes.push(override);
+            }
+          }
+          if (overrideEmpCodes.length > 0) {
+            const overrideCodes = [...new Set(overrideEmpCodes)];
+            const overrideCrewMap = await smarthr.getCrewsByEmpCodes(overrideCodes);
+            for (const [, crew] of overrideCrewMap) {
+              const entry = smarthr.toStaffMasterEntry(crew);
+              if (entry.staffName && entry.qualifications.length > 0) {
+                staffQualifications.set(entry.staffName, entry.qualifications);
+                const aliasName = resolveStaffAlias(entry.staffName);
+                if (aliasName !== entry.staffName) {
+                  staffQualifications.set(aliasName, entry.qualifications);
+                }
+                logger.info(`[${loc.name}][${currentTab}] emp_code 上書き補完: ${entry.staffName} → [${entry.qualifications.join(', ')}]`);
+              }
+            }
+          }
 
-      // エラー詳細
-      for (const r of results) {
-        if (r.errors.length > 0) {
-          logger.info(`--- ${r.locationName} エラー詳細 ---`);
-          for (const e of r.errors) {
-            logger.info(`  ${e.recordId}: [${e.category}] ${e.message}`);
+          logger.info(`[${loc.name}][${currentTab}] スタッフ資格マップ: ${staffQualifications.size}名分構築完了`);
+          for (const [name, quals] of staffQualifications) {
+            logger.debug(`  ${name}: [${quals.join(', ')}]`);
+          }
+        }
+
+        // ワークフロー作成 + マスタ設定
+        const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
+        workflow.setPatientMaster(patientMaster);
+        workflow.setStaffQualifications(staffQualifications);
+
+        // SmartHR 自動補登を有効化
+        if (smarthr) {
+          const staffSync = new StaffSyncService(smarthr, auth, {
+            cd: loc.tritrusOfficeCd,
+            name: loc.stationName,
+          });
+          workflow.setStaffAutoRegister(smarthr, staffSync);
+          logger.info(`[${loc.name}][${currentTab}] スタッフ自動補登: 有効（SmartHR 経由, 事業所=${loc.stationName}）`);
+        }
+
+        // コンテキスト作成
+        const context: WorkflowContext = {
+          workflowName: 'transcription',
+          startedAt: new Date(),
+          dryRun,
+          locations: [loc],
+          tab: currentTab,
+        };
+
+        // 転記実行
+        const startTime = Date.now();
+        const results = await workflow.run(context);
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        allResults.push(...results);
+
+        // 結果レポート
+        const totalProcessed = results.reduce((sum, r) => sum + r.processedRecords, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errorRecords, 0);
+        const totalRecords = results.reduce((sum, r) => sum + r.totalRecords, 0);
+        logger.info(`[${loc.name}][${currentTab}] 転記結果: 対象=${totalRecords}, 完了=${totalProcessed}, エラー=${totalErrors}, 所要=${elapsed}秒`);
+
+        // エラー詳細
+        for (const r of results) {
+          if (r.errors.length > 0) {
+            logger.info(`--- ${r.locationName} [${currentTab}] エラー詳細 ---`);
+            for (const e of r.errors) {
+              logger.info(`  ${e.recordId}: [${e.category}] ${e.message}`);
+            }
           }
         }
       }
 
-      // === 削除ワークフロー ===
+      // === 削除ワークフロー（事業所ごと1回、当月分のみ） ===
       try {
         logger.info('========================================');
         logger.info(`  ${loc.name} 削除処理開始`);
