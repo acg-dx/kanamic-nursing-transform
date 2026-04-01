@@ -632,11 +632,14 @@ export class DeletionWorkflow extends BaseWorkflow {
       const normalizedName = normalize(args.name);
 
       // 決定ボタンの onclick から患者名でマッチ
+      // (非表示) 行はスキップ（旧レコードへの誤マッチを防ぐ）
       const allButtons = Array.from(document.querySelectorAll('input[name="act_result"][value="決定"]'));
       for (const btn of allButtons) {
         const tr = btn.closest('tr');
         if (!tr) continue;
-        const rowText = normalize(tr.textContent || '');
+        const rawText = tr.textContent || '';
+        if (rawText.includes('(非表示)')) continue;
+        const rowText = normalize(rawText);
         if (rowText.includes(normalizedName)) {
           const onclick = btn.getAttribute('onclick') || '';
           const id = extractCareUserId(onclick);
@@ -645,9 +648,11 @@ export class DeletionWorkflow extends BaseWorkflow {
       }
 
       // フォールバック: HTML 行分割
+      // (非表示) 行はスキップ
       const body = document.body?.innerHTML || '';
       const rows = body.split('<tr');
       for (const row of rows) {
+        if (row.includes('(非表示)')) continue;
         const rowTextNorm = normalize(row.replace(/<[^>]*>/g, ''));
         if (rowTextNorm.includes(normalizedName)) {
           const id = extractCareUserId(row);

@@ -296,7 +296,9 @@ async function main() {
         const patientId = await k2_1FrameAfter.evaluate((name: string) => {
           const rows = Array.from(document.querySelectorAll('tr'));
           for (const row of rows) {
-            if (!(row.textContent || '').includes(name)) continue;
+            const text = row.textContent || '';
+            if (text.includes('(非表示)')) continue;
+            if (!text.includes(name)) continue;
             const el = row.querySelector('[onclick*="submitTargetFormEx"]') ||
                        row.querySelector('[onclick*="careuserid"]');
             if (!el) continue;
