@@ -19,8 +19,7 @@ import { NotificationService } from './services/notification.service';
 import { SmartHRService } from './services/smarthr.service';
 import { StaffSyncService } from './workflows/staff-sync/staff-sync.workflow';
 import { CorrectionDetector } from './workflows/correction/correction-detection';
-import { PatientMasterService } from './services/patient-master.service';
-import { PatientCsvDownloaderService } from './services/patient-csv-downloader.service';
+// PatientMasterService / PatientCsvDownloaderService は processLocation 内で事業所ごとに読み込み
 import { ReconciliationService } from './services/reconciliation.service';
 import type { WorkflowContext, WorkflowResult } from './types/workflow.types';
 import type { NotificationConfig, DailyReport, WorkflowReport } from './types/notification.types';
@@ -86,18 +85,7 @@ async function runWorkflow(workflowName: 'transcription' | 'deletion' | 'buildin
     if (workflowName === 'transcription') {
       const workflow = new TranscriptionWorkflow(browser, selectorEngine, sheets, auth);
 
-      // 利用者マスタ CSV を HAM からダウンロードして読み込み
-      try {
-        const csvDownloader = new PatientCsvDownloaderService(auth);
-        const targetMonth = PatientCsvDownloaderService.getCurrentMonth();
-        const csvPath = await csvDownloader.ensurePatientCsv({ targetMonth });
-        const patientMaster = new PatientMasterService();
-        await patientMaster.loadFromCsv(csvPath);
-        workflow.setPatientMaster(patientMaster);
-        logger.info(`利用者マスタ: ${patientMaster.count}名読み込み完了（自動ダウンロード）`);
-      } catch (csvError) {
-        logger.warn(`利用者マスタ CSV 自動ダウンロード失敗（転記は続行）: ${(csvError as Error).message}`);
-      }
+      // 利用者マスタ CSV は各事業所の processLocation 内で個別にダウンロード・読み込み
 
       // SmartHR が設定されている場合、転記前スタッフ自動補登を有効化
       if (smarthrConfig) {

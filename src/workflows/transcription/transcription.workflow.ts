@@ -753,7 +753,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // === Step 4.5a: 重複チェック — 同一日付+時刻のエントリ状態を確認 ===
     if (record.transcriptionFlag !== '修正あり') {
-      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName);
+      const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName, record.endTime);
       if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
@@ -1414,7 +1414,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // エラーチェック（hamerror.jsp ポップアップ検知）
     await this.checkForHamError(nav);
 
-    // 介護/予防判定（ログ出力のみ。実際の切替は k2_7_1 の 6a ステップで実施）
+    // 介護/予防判定 — showflag を決定し、act_i5 送信時に hiddenField として渡す。
+    // k2_2 のデフォルト showflag が医療(3)になっている場合、I5 が医療コンテキストで
+    // 作成されるバグを防止する（#122765: 介護リハビリが医療として登録される問題の修正）。
+    let i5Showflag = '1'; // デフォルト: 介護
     if (!this.patientMaster) {
       logger.warn(
         `I5 介護度判定スキップ: patientMaster 未設定（CSV ダウンロード失敗の可能性）` +
@@ -1429,6 +1432,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       } else {
         const careType = PatientMasterService.determineCareType(patient.careLevel);
         if (careType === '予防') {
+          i5Showflag = '2';
           logger.info(`I5フロー: 予防モード (${record.patientName}, 要介護度=${patient.careLevel})`);
         } else {
           logger.debug(`I5フロー: 介護モード (${record.patientName}, 要介護度=${patient.careLevel})`);
@@ -1443,6 +1447,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     let skipI5Creation = false;
     let skipI5StaffAssignment = false;
     if (record.transcriptionFlag !== '修正あり') {
+      // I5 は複数スロット分割（20分×N行）のため endTime を渡さない。
+      // k2_2 の最初の行は startTime〜startTime+20min で、record.endTime とは異なる。
       const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName);
       if (dupStatus === 'complete') {
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
@@ -1497,13 +1503,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     // Step 5: k2_2 で 訪看I5入力ボタン → k2_7_1
+    // showflag を hiddenField で渡し、介護/予防コンテキストを明示的に設定する。
+    // k2_2 が医療(showflag=3)をデフォルト表示している患者では、showflag 未指定だと
+    // I5 が医療コンテキストで作成される問題がある（#122765）。
     await nav.submitForm({
       action: 'act_i5',
       setLockCheck: true,
+      hiddenFields: { showflag: i5Showflag },
       waitForPageId: 'k2_7_1',
     });
     await this.sleep(1000);
-    logger.debug('I5フロー: k2_7_1に遷移');
+    logger.debug(`I5フロー: k2_7_1に遷移 (showflag=${i5Showflag})`);
 
     // Step 6: k2_7_1 で時間設定 + サービス回数 + サービス検索
     //
@@ -2546,6 +2556,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     visitDateHam: string,
     startTime: string,
     staffName?: string,
+    endTime?: string,
   ): Promise<'complete' | 'needs_jisseki' | 'partial' | 'none'> {
     const frame = await nav.getMainFrame('k2_2');
     const dayNum = parseInt(visitDateHam.substring(6, 8));
@@ -2557,7 +2568,24 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       ? normalizeCjkName(resolveStaffAlias(extractPlainName(staffName))).substring(0, 3)
       : '';
 
-    const result = await frame.evaluate(({ dd, st, surname, variantMap }) => {
+    // 終了時刻の許容値を計算: HAM は介護保険で -1分補正するため、endTime と endTime-1分 の両方を許容する
+    // 例: record.endTime='09:40' → '09:40' or '09:39' を許容
+    const endTimeVariants: string[] = [];
+    if (endTime) {
+      endTimeVariants.push(endTime);
+      // -1分バリアント（HAM の終了時刻 -1分補正対応）
+      const m = endTime.match(/^(\d{1,2}):(\d{2})$/);
+      if (m) {
+        const totalMin = parseInt(m[1]) * 60 + parseInt(m[2]) - 1;
+        if (totalMin >= 0) {
+          const adjH = String(Math.floor(totalMin / 60)).padStart(2, '0');
+          const adjM = String(totalMin % 60).padStart(2, '0');
+          endTimeVariants.push(`${adjH}:${adjM}`);
+        }
+      }
+    }
+
+    const result = await frame.evaluate(({ dd, st, surname, variantMap, endVariants }) => {
       // ブラウザ内 CJK 正規化（VS除去 + 旧字体→新字体 + ひらがな→カタカナ）
       function normalizeCjk(s: string): string {
         let r = s.normalize('NFKC');
@@ -2586,6 +2614,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         }
         if (!inTargetDay) continue;
         if (!text.includes(st)) continue;
+        // 終了時刻チェック: endVariants が指定されている場合、いずれかの終了時刻が含まれていることを確認。
+        // 一致しない場合は別の訪問エントリ（異なる訪問時間）なのでスキップする。
+        // (#122730: 同一開始時刻の別エントリを誤って重複判定する問題の修正)
+        if (endVariants.length > 0 && !endVariants.some(et => text.includes(et))) continue;
         // 編集ボタン or 配置ボタンがある → スケジュール存在
         const hasEdit = row.querySelector('input[value="編集"]');
         const hasHaichi = row.querySelector('input[name="act_modify"][value="配置"]');
@@ -2613,7 +2645,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
       if (foundNeedsJisseki) return 'needs_jisseki';
       return foundPartial ? 'partial' : 'none';
-    }, { dd: dayDisplay, st: startTime, surname: staffSurname, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
+    }, { dd: dayDisplay, st: startTime, surname: staffSurname, variantMap: CJK_VARIANT_MAP_SERIALIZABLE, endVariants: endTimeVariants });
 
     if (result === 'complete') {
       logger.info(`重複検出（完了済み）: ${dayDisplay} ${startTime}${staffSurname ? ` [${staffSurname}]` : ''} — スケジュール＋スタッフ配置＋実績1。スキップします`);

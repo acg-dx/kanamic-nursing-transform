@@ -7,6 +7,8 @@ export interface RetryOptions {
   backoffMultiplier: number;
   /** 重试前的回调（例: 页面刷新/恢复到已知状态） */
   onRetry?: (attempt: number, error: Error) => Promise<void>;
+  /** 判定错误是否不可重试（数据问题等），返回 true 则立即抛出不重试 */
+  isNonRetryable?: (error: Error) => boolean;
 }
 
 const DEFAULT_OPTIONS: RetryOptions = {
@@ -30,6 +32,12 @@ export async function withRetry<T>(
     } catch (error) {
       lastError = error as Error;
       logger.warn(`[${label}] 第${attempt}/${opts.maxAttempts}次尝试失败: ${lastError.message}`);
+
+      // 不可重试错误（数据问题等）→ 立即抛出，不触发 onRetry/重登录
+      if (opts.isNonRetryable?.(lastError)) {
+        logger.info(`[${label}] データ不備のため重试をスキップ（再ログイン不要）`);
+        throw lastError;
+      }
 
       if (attempt < opts.maxAttempts) {
         const delay = Math.min(

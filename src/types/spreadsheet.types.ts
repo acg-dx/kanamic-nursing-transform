@@ -87,6 +87,7 @@ export interface CorrectionRecord {
   changeDetail: string;   // F: 変更内容詳細
   status: string;         // G: ステータス
   errorLog: string;       // H: エラーログ
+  processedFlag: string;  // I: 処理済みフラグ ("1" = 処理済み)
 }
 
 /** 同一建物管理记录（独立Sheet） */

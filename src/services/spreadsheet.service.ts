@@ -411,7 +411,7 @@ export class SpreadsheetService {
   }
 
   async getCorrectionRecords(sheetId: string): Promise<CorrectionRecord[]> {
-    const range = '看護記録修正管理!A2:H';
+    const range = '看護記録修正管理!A2:I';
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
@@ -430,11 +430,30 @@ export class SpreadsheetService {
           changeDetail: row[COL_F] || '',
           status: row[COL_G] || '',
           errorLog: row[COL_H] || '',
+          processedFlag: row[8] || '',  // I列 (index 8)
         }));
     } catch (error) {
       logger.error(`修正レコード取得エラー: ${(error as Error).message}`);
       return []; // 修正管理Sheetが存在しない場合は空配列
     }
+  }
+
+  /**
+   * 修正管理レコードを「処理済み」にマーク
+   * G列を「処理済み」に、I列を "1" に更新する。
+   */
+  async markCorrectionProcessed(sheetId: string, rowIndex: number): Promise<void> {
+    await this.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: [
+          { range: `看護記録修正管理!G${rowIndex}`, values: [['処理済み']] },
+          { range: `看護記録修正管理!I${rowIndex}`, values: [['1']] },
+        ],
+      },
+    });
+    logger.debug(`修正管理レコード処理済みマーク: row=${rowIndex}`);
   }
 
   async updateCorrectionStatus(

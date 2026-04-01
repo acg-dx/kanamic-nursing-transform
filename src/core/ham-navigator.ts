@@ -71,7 +71,7 @@ export class HamNavigator {
    */
   async getMainFrame(pageId?: string): Promise<Frame> {
     const hamPage = this.hamPage;
-    await hamPage.waitForLoadState('load').catch(() => {});
+    await hamPage.waitForLoadState('load', { timeout: 10000 }).catch(() => {});
 
     // 全フレームからメインフレームを検索
     const allFrames = hamPage.frames();
@@ -124,12 +124,15 @@ export class HamNavigator {
     let frame: Frame | null = null;
     for (let i = 0; i < 20; i++) {
       const candidate = await this.getMainFrame();
-      const hasForm = await candidate.evaluate(() => !!document.forms[0]).catch(() => false);
+      const hasForm = await Promise.race([
+        candidate.evaluate(() => !!document.forms[0]).catch(() => false),
+        new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+      ]);
       if (hasForm) { frame = candidate; break; }
       await this.sleep(500);
     }
     if (!frame) {
-      frame = await this.getMainFrame();
+      throw new Error(`submitForm(${options.action}): 10秒以内に form を持つフレームが見つかりませんでした`);
     }
 
     // form.submit() はフレーム遷移を発生させるため、evaluate の Promise が
@@ -212,8 +215,8 @@ export class HamNavigator {
       return this.waitForMainFrame(options.waitForPageId, timeout);
     }
 
-    // pageId 指定なしの場合はフレームのロード完了を待つ
-    await this.hamPage.waitForLoadState('load').catch(() => {});
+    // pageId 指定なしの場合はフレームのロード完了を待つ（10秒タイムアウト）
+    await this.hamPage.waitForLoadState('load', { timeout: 10000 }).catch(() => {});
     await this.sleep(500); // フレーム再構築待ち
     return this.getMainFrame();
   }
@@ -231,7 +234,10 @@ export class HamNavigator {
       try {
         const frame = await this.getMainFrame(pageId);
         if (frame && frame.url().includes(pageId)) {
-          const domReady = await frame.evaluate(() => !!document.forms[0]).catch(() => false);
+          const domReady = await Promise.race([
+            frame.evaluate(() => !!document.forms[0]).catch(() => false),
+            new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+          ]);
           if (domReady) return frame;
         }
       } catch {
@@ -239,9 +245,7 @@ export class HamNavigator {
       }
       await this.sleep(300);
     }
-    // タイムアウトしても最新のフレームを返す（partial match）
-    logger.warn(`waitForMainFrame タイムアウト: pageId=${pageId}`);
-    return this.getMainFrame();
+    throw new Error(`waitForMainFrame タイムアウト: pageId=${pageId} が ${timeout}ms 以内に出現しませんでした`);
   }
 
   /**
@@ -478,13 +482,16 @@ export class HamNavigator {
       await this.sleep(500);
       try {
         const frame = await this.getMainFrame();
-        const hasRadio = await frame.evaluate(() =>
-          !!document.forms[0] && document.querySelectorAll('input[name="radio"]').length > 0
-        ).catch(() => false);
+        const hasRadio = await Promise.race([
+          frame.evaluate(() =>
+            !!document.forms[0] && document.querySelectorAll('input[name="radio"]').length > 0
+          ).catch(() => false),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+        ]);
         if (hasRadio) return;
       } catch { /* retry */ }
     }
-    logger.warn('switchInsuranceType: radio ボタンの出現を確認できませんでした');
+    throw new Error('switchInsuranceType: radio ボタンの出現を確認できませんでした（保険種別切替失敗）');
   }
 
   /**
@@ -536,10 +543,14 @@ export class HamNavigator {
       const pageId = match[1];
 
       // k2_1 の場合は DOM 内容も検証（searchdate select が存在するか）
+      // evaluate は OOM 時にハングするため 5秒タイムアウトで保護
       if (pageId === 'k2_1') {
-        const hasSearchDate = await frame.evaluate(() =>
-          !!document.querySelector('select[name="searchdate"]')
-        ).catch(() => false);
+        const hasSearchDate = await Promise.race([
+          frame.evaluate(() =>
+            !!document.querySelector('select[name="searchdate"]')
+          ).catch(() => false),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+        ]);
         if (!hasSearchDate) {
           logger.warn(`getCurrentPageId: URL は k2_1 だが searchdate が存在しません — 異常ページ`);
           return null;
@@ -548,7 +559,10 @@ export class HamNavigator {
 
       // 汎用チェック: form が存在するか（syserror ページ等を除外）
       if (pageId !== 't1-2') {
-        const hasForm = await frame.evaluate(() => !!document.forms[0]).catch(() => false);
+        const hasForm = await Promise.race([
+          frame.evaluate(() => !!document.forms[0]).catch(() => false),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+        ]);
         if (!hasForm) {
           logger.warn(`getCurrentPageId: URL は ${pageId} だが form が存在しません`);
           return null;

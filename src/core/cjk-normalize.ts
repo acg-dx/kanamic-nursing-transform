@@ -99,6 +99,15 @@ export const CJK_VARIANT_MAP: Record<string, string> = {
   '疊': '畳',
   '齒': '歯',
   '假': '仮',
+
+  // 実運用で検出された追加異体字（利用者名マッチング失敗から特定）
+  '覺': '覚', // U+89BA — 覺堂 → 覚堂
+  '冨': '富', // U+51A8 — 冨田 → 富田
+  '滿': '満', // U+6EFF — 鎌倉滿子 → 鎌倉満子
+  '晧': '皓', // U+6667 — 笹川晧子 → 笹川皓子（どちらも使われるが統一）
+  '塲': '場', // U+5872 — 木塲 → 木場
+  '當': '当', // U+7576 — 部當 → 部当
+  '簑': '蓑', // U+7C11 — 簑島 → 蓑島
 };
 
 /**
@@ -117,6 +126,11 @@ export function normalizeCjkName(name: string): string {
   // Variation Selectors を除去 (VS1-VS16: U+FE00-FE0F, VS17-VS256: U+E0100-E01EF)
   // Google Sheets が付与する不可見文字で、文字列比較を妨げる (例: 榊󠄀 → 榊)
   result = result.replace(/[\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g, '');
+  // ゼロ幅文字・不可見制御文字を除去
+  // Google Sheets からのコピペや外部システム連携で混入する不可見文字:
+  //   U+200B Zero-Width Space, U+200C ZWNJ, U+200D ZWJ,
+  //   U+200E/200F LTR/RTL Mark, U+2060 Word Joiner, U+FEFF BOM
+  result = result.replace(/[\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g, '');
   for (const [old, replacement] of Object.entries(CJK_VARIANT_MAP)) {
     if (result.includes(old)) {
       result = result.replaceAll(old, replacement);
@@ -126,6 +140,12 @@ export function normalizeCjkName(name: string): string {
   result = result.replace(/[\u3041-\u3096]/g, ch =>
     String.fromCharCode(ch.charCodeAt(0) + 0x60)
   );
+  // ヲ → オ 統一（人名文脈では を/ヲ は お/オ のバリエーション。例: しをり → シオリ）
+  result = result.replace(/\u30F2/g, '\u30AA');
+  // ヱ → エ 統一（旧仮名 ヱ は現代仮名 エ に対応。例: スミヱ → スミエ）
+  result = result.replace(/\u30F1/g, '\u30A8');
+  // ゑ → エ 統一（ひらがなの旧仮名 ゑ → カタカナ エ。ひらがな→カタカナ変換は
+  // U+3041-U+3096 範囲で処理済みだが ゑ(U+3091)→ヱ(U+30F1) のため別途 ヱ→エ で対応）
   return result.replace(/[\s\u3000\u00a0]+/g, '').trim();
 }
 
@@ -158,6 +178,18 @@ export const CJK_VARIANT_MAP_SERIALIZABLE = Object.entries(CJK_VARIANT_MAP);
  */
 export const STAFF_NAME_ALIASES: Record<string, string> = {
   '新盛裕望': '落合裕望',
+  '木村利愛': '高山利愛',
+  '上畝地葉月': '竹崎葉月',
+};
+
+/**
+ * スタッフ従業員番号の上書きマッピング
+ *
+ * Sheet 上の emp_code が SmartHR/HAM と一致しない場合に、
+ * スタッフ名（空白除去済み）をキーとして正しい emp_code に変換する。
+ */
+export const STAFF_EMPCODE_OVERRIDES: Record<string, string> = {
+  '木村利愛': '1210', // Sheet=1218(中野楓), HAM=1210(髙山利愛)
 };
 
 /**
@@ -167,7 +199,7 @@ export const STAFF_NAME_ALIASES: Record<string, string> = {
  * 一致しなければそのまま返す。
  */
 export function resolveStaffAlias(name: string): string {
-  const normalized = name.replace(/[\s\u3000]+/g, '');
+  const normalized = name.replace(/[\s\u3000\u00a0]+/g, '');
   return STAFF_NAME_ALIASES[normalized] || normalized;
 }
 
@@ -175,13 +207,14 @@ export function resolveStaffAlias(name: string): string {
  * 資格プレフィックスのリスト（明示的リスト — 汎用ダッシュ分割は使用しない）
  * 人名にダッシュが含まれる場合があるため、既知のプレフィックスのみ除去する。
  */
-const QUALIFICATION_PREFIXES = [
+export const QUALIFICATION_PREFIXES = [
   '看護師-',
   '准看護師-',
   '理学療法士等-',
   '理学療法士-',
   '作業療法士-',
   '言語聴覚士-',
+  '保健師-',
 ];
 
 /**

@@ -45,6 +45,7 @@ export class CorrectionDetector {
       changeDetail,
       status: '未処理',
       errorLog: '',
+      processedFlag: '',
     };
 
     await this.sheets.appendCorrectionRecord(sheetId, correctionRecord);

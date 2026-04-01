@@ -28,6 +28,8 @@ export interface CsvDownloadOptions {
   timeout?: number;
   /** 強制再ダウンロード (デフォルト: false) */
   force?: boolean;
+  /** 事業所コード（指定時はそのコードの CSV のみキャッシュ一致） */
+  officeCd?: string;
 }
 
 export class PatientCsvDownloaderService {
@@ -43,7 +45,7 @@ export class PatientCsvDownloaderService {
    */
   async ensurePatientCsv(options: CsvDownloadOptions): Promise<string> {
     if (!options.force) {
-      const existing = this.findLocalCsv(options.targetMonth, options.downloadDir);
+      const existing = this.findLocalCsv(options.targetMonth, options.downloadDir, options.officeCd);
       if (existing) {
         logger.info(`利用者マスタ CSV: ローカルキャッシュ使用 → ${existing}`);
         return existing;
@@ -56,8 +58,12 @@ export class PatientCsvDownloaderService {
   /**
    * ローカルに当月の CSV が存在するか検索
    * パターン: *userallfull*{YYYYMM}*.csv
+   *
+   * @param targetMonth YYYYMM 形式
+   * @param downloadDir ダウンロード保存先
+   * @param officeCd 事業所コード（指定時はそのコードを含むファイルのみ一致）
    */
-  findLocalCsv(targetMonth: string, downloadDir?: string): string | null {
+  findLocalCsv(targetMonth: string, downloadDir?: string, officeCd?: string): string | null {
     const dirs = [
       path.resolve(downloadDir || './downloads'),
       path.resolve('.'),  // プロジェクトルート
@@ -66,9 +72,12 @@ export class PatientCsvDownloaderService {
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) continue;
       const files = fs.readdirSync(dir);
-      const match = files.find(f =>
-        f.includes('userallfull') && f.includes(targetMonth) && f.endsWith('.csv')
-      );
+      const match = files.find(f => {
+        if (!f.includes('userallfull') || !f.includes(targetMonth) || !f.endsWith('.csv')) return false;
+        // 事業所コードが指定されている場合、ファイル名に含まれるか確認
+        if (officeCd && !f.includes(officeCd)) return false;
+        return true;
+      });
       if (match) {
         const fullPath = path.join(dir, match);
         const stat = fs.statSync(fullPath);
