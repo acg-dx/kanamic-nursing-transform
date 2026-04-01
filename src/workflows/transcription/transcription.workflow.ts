@@ -467,6 +467,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       // スタッフ名プレフィックスから資格スコアを算出（看護師=2, 准看護師=1, その他=0）
       const scored = group.map(r => {
         const name = r.staffName || '';
+        const pCol = r.accompanyClerkCheck?.trim() || '';
+        // 同行者は isTranscriptionTarget で必ず除外されるため、winner 候補から排除する。
+        // 同行者が winner になると、実際に転記されるべきレコード（支援者/複数人等）が
+        // blocked されてしまい、グループ全体が未転記になる（#270895）
+        if (pCol === '同行者') return { record: r, score: -1 };
         let score = 0;
         if (name.startsWith('看護師')) score = 2;
         else if (name.startsWith('准看護師')) score = 1;
