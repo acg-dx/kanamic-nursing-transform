@@ -2138,6 +2138,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
 
       // HAM choice() でスタッフ選択（CJK 異体字正規化: NFKC + VS除去 + 旧字体→新字体 + ひらがな→カタカナ）
+      // I5 結合サービスでは同一患者の隣接スロットに同じスタッフを配置するため、
+      // HAM がボタンを disabled にしても choice() で強制配置を試みる
       const choiceResult = await staffFrame.evaluate((args: { searchName: string; variantMap: [string, string][] }) => {
         function normCjk(s: string): string {
           let r = s.normalize('NFKC');
@@ -2152,15 +2154,17 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
         }
         const rows = Array.from(document.querySelectorAll('tr'));
-        let foundButDisabled = false;
+        let disabledBtn: HTMLInputElement | null = null;
+        let disabledOnclick = '';
         for (const row of rows) {
           const rowText = normCjk(row.textContent || '');
           if (!rowText.includes(args.searchName)) continue;
           const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
           if (!selectBtn) continue;
-          // 選択ボタンが disabled → スタッフは存在するが同時間帯に他利用者の予定と重複
+          // 選択ボタンが disabled → 記録して後でフォールバック（I5 隣接スロット対応）
           if (selectBtn.disabled) {
-            foundButDisabled = true;
+            disabledBtn = selectBtn;
+            disabledOnclick = selectBtn.getAttribute('onclick') || '';
             continue;
           }
           const onclick = selectBtn.getAttribute('onclick') || '';
@@ -2179,8 +2183,27 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           selectBtn.click();
           return { found: true, disabled: false, staffName: args.searchName };
         }
-        return { found: false, disabled: foundButDisabled, staffName: '' };
+        // 有効なボタンが見つからなかったが disabled ボタンがある場合、
+        // disabled を解除して choice() で強制配置（I5 同一患者の隣接スロット）
+        if (disabledBtn) {
+          const m = disabledOnclick.match(/choice\(this,\s*'(\d+)',\s*'([^']+)'(?:,\s*(?:'[^']*'|\d+))?\)/);
+          if (m) {
+            disabledBtn.disabled = false;
+            (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
+            if (typeof (window as any).choice === 'function') { // eslint-disable-line @typescript-eslint/no-explicit-any
+              (window as any).choice(disabledBtn, m[1], m[2], 1); // eslint-disable-line @typescript-eslint/no-explicit-any
+              return { found: true, disabled: false, staffName: m[2], forcedDisabled: true };
+            }
+            disabledBtn.click();
+            return { found: true, disabled: false, staffName: m[2], forcedDisabled: true };
+          }
+        }
+        return { found: false, disabled: !!disabledBtn, staffName: '' };
       }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
+
+      if ((choiceResult as any).forcedDisabled) {
+        logger.warn(`I5 スタッフ配置: 「${record.staffName}」の選択ボタンが disabled だったため強制配置 (assignId=${aid}, 同一患者の隣接スロット)`);
+      }
 
       if (!choiceResult.found) {
         // デバッグ: 従業員リストに表示されている全スタッフ名を取得
