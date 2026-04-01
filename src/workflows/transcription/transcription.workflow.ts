@@ -1459,8 +1459,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
       if (dupStatus === 'needs_jisseki') {
         skipI5Creation = true;
-        skipI5StaffAssignment = true;
-        logger.info(`I5 実績未設定検出 → 実績フラグのみ更新: ${record.recordId}`);
+        // ★ I5 は複数スロット分割のため、1行目がスタッフ配置済みでも
+        // 2行目以降が未配置の場合がある（前回実行が途中で失敗したケース）。
+        // skipI5StaffAssignment を false のまま残し、assignStaffToAllUnassigned で
+        // 残存する未配置行にもスタッフを配置する。(#172654)
+        logger.info(`I5 実績未設定検出 → スケジュール作成スキップ・スタッフ未配置行があれば配置: ${record.recordId}`);
       }
       if (dupStatus === 'partial') {
         skipI5Creation = true;
