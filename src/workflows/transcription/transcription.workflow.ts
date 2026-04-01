@@ -2403,12 +2403,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       const normalizedName = normalize(name);
 
       // === 方法1: 被保険者番号で検索（最も正確・同名同姓対応） ===
+      // (非表示) 行はスキップ（旧レコードには利用者番号が表示されないが念のため除外）
       if (useHihokensha && hihokensha) {
         const hButtons = Array.from(document.querySelectorAll('input[name="act_result"][value="決定"]'));
         for (const btn of hButtons) {
           const tr = btn.closest('tr');
           if (!tr) continue;
           const rowText = tr.textContent || '';
+          if (rowText.includes('(非表示)')) continue;
           if (rowText.includes(hihokensha)) {
             const onclick = btn.getAttribute('onclick') || '';
             const id = extractCareUserId(onclick);
@@ -2418,11 +2420,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
 
       // === 方法2: 決定ボタンの onclick から患者名でマッチ ===
+      // (非表示) 行はスキップ（旧レコードへの誤マッチを防ぐ）
       const allButtons = Array.from(document.querySelectorAll('input[name="act_result"][value="決定"]'));
       for (const btn of allButtons) {
         const tr = btn.closest('tr');
         if (!tr) continue;
-        const rowText = normalize(tr.textContent || '');
+        const rawText = tr.textContent || '';
+        if (rawText.includes('(非表示)')) continue;
+        const rowText = normalize(rawText);
         if (rowText.includes(normalizedName)) {
           const onclick = btn.getAttribute('onclick') || '';
           const id = extractCareUserId(onclick);
@@ -2431,9 +2436,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
 
       // === 方法3: HTML 行分割でフォールバック ===
+      // (非表示) 行はスキップ
       const body = document.body?.innerHTML || '';
       const rows = body.split('<tr');
       for (const row of rows) {
+        if (row.includes('(非表示)')) continue;
         const rowTextNorm = normalize(row.replace(/<[^>]*>/g, ''));
         if (rowTextNorm.includes(normalizedName)) {
           const id = extractCareUserId(row);

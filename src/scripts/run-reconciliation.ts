@@ -4,6 +4,8 @@
  * HAM の 8-1 スケジュールデータ出力 CSV をダウンロードし、
  * Google Sheets の転記レコードと突合して差異レポートを出力する。
  *
+ * 全事業所を順番に処理し、汇总レポートを出力する。
+ *
  * 突合内容:
  *   1. Sheets で「転記済み」なのに HAM にない → 転記漏れ
  *   2. HAM にあるが Sheets にない → 手動追加 or 二重登録
@@ -11,9 +13,8 @@
  *   4. 前月未登録レコードの有無
  *
  * 使用方法:
- *   npx tsx src/scripts/run-reconciliation.ts                        # 当月の突合（8-1 CSV 自動ダウンロード）
- *   npx tsx src/scripts/run-reconciliation.ts --month=202602         # 指定月の突合
- *   npx tsx src/scripts/run-reconciliation.ts --csv=./schedule.csv   # ローカル CSV を使用
+ *   npx tsx src/scripts/run-reconciliation.ts                        # 当月の突合（全事業所、8-1 CSV 自動ダウンロード）
+ *   npx tsx src/scripts/run-reconciliation.ts --month=202603         # 指定月の突合
  *   npx tsx src/scripts/run-reconciliation.ts --skip-download        # CSV ダウンロードスキップ（ローカルのみ）
  *   npx tsx src/scripts/run-reconciliation.ts --check-prev-only      # 前月未登録チェックのみ
  */
@@ -30,51 +31,38 @@ process.on('SIGINT', () => {
   process.exit(130);
 });
 
+import { loadConfig } from '../config/app.config';
 import { BrowserManager } from '../core/browser-manager';
 import { SelectorEngine } from '../core/selector-engine';
 import { AIHealingService } from '../core/ai-healing-service';
 import { SpreadsheetService } from '../services/spreadsheet.service';
 import { KanamickAuthService } from '../services/kanamick-auth.service';
 import { ScheduleCsvDownloaderService } from '../services/schedule-csv-downloader.service';
-import { ReconciliationService } from '../services/reconciliation.service';
+import { ReconciliationService, type ReconciliationResult } from '../services/reconciliation.service';
 import { SmartHRService } from '../services/smarthr.service';
 
-/** 姶良事業所 Sheet ID */
-const AIRA_SHEET_ID = '12lzQUObLw0ymZdTRPpBWqECRkRimMXO7-m9maWPUt6M';
-
 interface CliArgs {
-  /** 対象年月 (YYYYMM 形式) */
   month: string;
-  /** ローカル CSV パス（明示指定） */
-  csvPath?: string;
-  /** CSV ダウンロードスキップ */
   skipDownload: boolean;
-  /** 前月未登録チェックのみ */
   checkPrevOnly: boolean;
-  /** 出力ファイルパス */
   output?: string;
 }
 
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
   const monthArg = args.find(a => a.startsWith('--month='))?.split('=')[1];
-  const csvArg = args.find(a => a.startsWith('--csv='))?.split('=')[1];
   const outputArg = args.find(a => a.startsWith('--output='))?.split('=')[1];
   const skipDownload = args.includes('--skip-download');
   const checkPrevOnly = args.includes('--check-prev-only');
 
   return {
     month: monthArg || ScheduleCsvDownloaderService.getCurrentMonth(),
-    csvPath: csvArg,
     skipDownload,
     checkPrevOnly,
     output: outputArg,
   };
 }
 
-/**
- * 当月タブ名を返す（形式: "2026年03月"）
- */
 function getMonthTab(yyyymm: string): string {
   const year = yyyymm.substring(0, 4);
   const month = yyyymm.substring(4, 6);
@@ -83,198 +71,215 @@ function getMonthTab(yyyymm: string): string {
 
 async function main(): Promise<void> {
   const cliArgs = parseArgs();
+  const config = loadConfig();
+  const locations = config.sheets.locations;
 
   logger.info('========================================');
-  logger.info('  予実突合（Reconciliation）');
-  logger.info(`  事業所: 姶良`);
-  logger.info(`  Sheet ID: ${AIRA_SHEET_ID}`);
+  logger.info('  予実突合（Reconciliation）— 全事業所');
+  logger.info(`  対象事業所: ${locations.map(l => l.name).join(', ')}`);
   logger.info(`  対象月: ${cliArgs.month}`);
-  if (cliArgs.csvPath) logger.info(`  CSV: ${cliArgs.csvPath}`);
-  if (cliArgs.skipDownload) logger.info(`  ダウンロードスキップ: true`);
-  if (cliArgs.checkPrevOnly) logger.info(`  前月チェックのみ: true`);
+  if (cliArgs.skipDownload) logger.info('  ダウンロードスキップ: true');
+  if (cliArgs.checkPrevOnly) logger.info('  前月チェックのみ: true');
   logger.info('========================================');
 
-  // 環境変数チェック（前月チェックのみの場合は HAM 不要）
-  const kanamickUrl = process.env.KANAMICK_URL;
-  const kanamickUser = process.env.KANAMICK_USERNAME;
-  const kanamickPass = process.env.KANAMICK_PASSWORD;
+  const kanamickUrl = process.env.KANAMICK_URL || config.kanamick.url;
+  const kanamickUser = process.env.KANAMICK_USERNAME || config.kanamick.username;
+  const kanamickPass = process.env.KANAMICK_PASSWORD || config.kanamick.password;
 
-  const needsHam = !cliArgs.checkPrevOnly && !cliArgs.csvPath && !cliArgs.skipDownload;
+  const needsHam = !cliArgs.checkPrevOnly && !cliArgs.skipDownload;
   if (needsHam && (!kanamickUrl || !kanamickUser || !kanamickPass)) {
     logger.error('KANAMICK_URL, KANAMICK_USERNAME, KANAMICK_PASSWORD が必要です');
     process.exit(1);
   }
 
-  // サービス初期化
   const sheets = new SpreadsheetService(
-    process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || './kangotenki.json',
+    process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH || config.sheets.serviceAccountKeyPath,
   );
-  const reconciliation = new ReconciliationService(sheets);
 
-  // === Step 1: 前月未登録チェック ===
-  logger.info('--- 前月未登録チェック ---');
-  const prevResult = await reconciliation.checkPreviousMonthUnregistered(AIRA_SHEET_ID);
-
-  if (prevResult.hasPending) {
-    logger.warn(`前月に未登録レコード ${prevResult.pendingCount} 件を検出！`);
-    logger.warn('当月の転記前に前月分を処理してください。');
-  } else {
-    logger.info('前月未登録レコードなし');
-  }
-
-  if (cliArgs.checkPrevOnly) {
-    // 前月チェックのみの場合はここで終了
-    if (prevResult.hasPending) {
-      logger.info('');
-      logger.info('--- 前月未登録レコード一覧 ---');
-      for (const r of prevResult.pendingRecords) {
-        logger.info(`  ${r.recordId}: ${r.patientName} (${r.visitDate}) ${r.staffName} [${r.transcriptionFlag || '未転記'}]`);
-      }
-    }
-    process.exit(prevResult.hasPending ? 1 : 0);
-  }
-
-  // === Step 2: 8-1 CSV の取得 ===
-  let csvPath: string;
-
-  if (cliArgs.csvPath) {
-    // ローカル CSV 指定
-    csvPath = path.resolve(cliArgs.csvPath);
-    if (!fs.existsSync(csvPath)) {
-      logger.error(`CSV ファイルが見つかりません: ${csvPath}`);
-      process.exit(1);
-    }
-    logger.info(`CSV: ローカルファイル使用 → ${csvPath}`);
-  } else if (cliArgs.skipDownload) {
-    // ダウンロードスキップ → ローカルキャッシュから検索
-    const downloader = new ScheduleCsvDownloaderService(null as unknown as KanamickAuthService);
-    const localCsv = downloader.findLocalCsv(cliArgs.month);
-    if (!localCsv) {
-      logger.error(`ローカルに ${cliArgs.month} の 8-1 CSV が見つかりません。--csv= で指定するか、--skip-download を外してください`);
-      process.exit(1);
-    }
-    csvPath = localCsv;
-    logger.info(`CSV: ローカルキャッシュ使用 → ${csvPath}`);
-  } else {
-    // HAM から自動ダウンロード
-    logger.info('8-1 CSV を HAM からダウンロード中...');
-
-    const aiHealing = new AIHealingService(
-      process.env.OPENAI_API_KEY || '',
-      process.env.AI_HEALING_MODEL || 'gpt-4o',
-    );
-    const selectorEngine = new SelectorEngine(aiHealing);
-    const browser = new BrowserManager(selectorEngine);
-    const auth = new KanamickAuthService({
-      url: kanamickUrl!,
-      username: kanamickUser!,
-      password: kanamickPass!,
-      stationName: process.env.KANAMICK_STATION_NAME || '訪問看護ステーションあおぞら姶良',
-      hamOfficeKey: process.env.KANAMICK_HAM_OFFICE_KEY || '6',
-      hamOfficeCode: process.env.KANAMICK_HAM_OFFICE_CODE || '400021814',
-    });
-
-    try {
-      await browser.launch();
-      auth.setContext(browser.browserContext);
-      await auth.login();
-
-      const csvDownloader = new ScheduleCsvDownloaderService(auth);
-      csvPath = await csvDownloader.ensureScheduleCsv({
-        targetMonth: cliArgs.month,
-      });
-      logger.info(`CSV: ダウンロード完了 → ${csvPath}`);
-    } catch (error) {
-      logger.error(`8-1 CSV ダウンロード失敗: ${(error as Error).message}`);
-      process.exit(1);
-    } finally {
-      await browser.close();
-    }
-  }
-
-  // === Step 2.5: SmartHR 資格情報の取得 ===
-  logger.info('--- SmartHR 資格情報を取得中 ---');
+  // SmartHR 資格マップ（全事業所共通）
+  let staffQualMap: Map<string, string> | null = null;
   const smarthrAccessToken = process.env.SMARTHR_ACCESS_TOKEN;
-  if (!smarthrAccessToken) {
-    logger.warn('SMARTHR_ACCESS_TOKEN が設定されていません。CSV ベースの准看護師検出にフォールバック');
-  } else {
+  if (smarthrAccessToken) {
     try {
       const smarthr = new SmartHRService({
         baseUrl: process.env.SMARTHR_BASE_URL || 'https://acg.smarthr.jp/api/v1',
         accessToken: smarthrAccessToken,
       });
-
       const allCrews = await smarthr.getAllCrews();
-      const staffQualMap = new Map<string, string>();
-
+      staffQualMap = new Map();
       for (const crew of allCrews) {
         const quals = smarthr.getQualifications(crew);
         const hasKangoshi = quals.some(q => q === '看護師' || q === '正看護師');
         const hasJun = quals.some(q => q === '准看護師');
-
-        // 看護師 > 准看護師 優先ルール
         const actual = hasKangoshi ? '看護師' : (hasJun ? '准看護師' : null);
         if (actual) {
           const legalName = `${crew.last_name}${crew.first_name}`.normalize('NFKC').replace(/[\s\u3000\u00a0]+/g, '').trim();
           const businessName = crew.business_last_name
             ? `${crew.business_last_name}${crew.business_first_name || ''}`.normalize('NFKC').replace(/[\s\u3000\u00a0]+/g, '').trim()
             : '';
-
           if (legalName) staffQualMap.set(legalName, actual);
           if (businessName && businessName !== legalName) staffQualMap.set(businessName, actual);
         }
       }
-
-      reconciliation.setStaffQualifications(staffQualMap);
-      logger.info(`SmartHR 資格マップ設定完了: ${staffQualMap.size} 名分の資格情報`);
+      logger.info(`SmartHR 資格マップ: ${staffQualMap.size} 名分`);
     } catch (error) {
-      logger.warn(`SmartHR 資格情報取得失敗: ${(error as Error).message}。CSV ベースの准看護師検出にフォールバック`);
+      logger.warn(`SmartHR 資格情報取得失敗: ${(error as Error).message}`);
     }
   }
 
-  // === Step 3: 突合実行 ===
+  // === 前月チェックのみモード ===
+  if (cliArgs.checkPrevOnly) {
+    let hasDiff = false;
+    for (const loc of locations) {
+      logger.info(`--- [${loc.name}] 前月未登録チェック ---`);
+      const reconciliation = new ReconciliationService(sheets);
+      const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
+      if (prevResult.hasPending) {
+        hasDiff = true;
+        for (const r of prevResult.pendingRecords) {
+          logger.info(`  ${r.recordId}: ${r.patientName} (${r.visitDate}) ${r.staffName} [${r.transcriptionFlag || '未転記'}]`);
+        }
+      }
+    }
+    process.exit(hasDiff ? 1 : 0);
+  }
+
+  // === ブラウザ初期化（8-1 CSV ダウンロード用） ===
+  let browser: BrowserManager | null = null;
+  if (needsHam) {
+    const aiHealing = new AIHealingService(
+      process.env.OPENAI_API_KEY || '',
+      process.env.AI_HEALING_MODEL || 'gpt-4o',
+    );
+    const selectorEngine = new SelectorEngine(aiHealing);
+    browser = new BrowserManager(selectorEngine);
+    await browser.launch();
+  }
+
   const tab = getMonthTab(cliArgs.month);
-  logger.info(`--- 突合実行: ${tab} ---`);
+  const allResults: Array<{ name: string; result: ReconciliationResult }> = [];
 
-  const result = await reconciliation.reconcile(csvPath, AIRA_SHEET_ID, tab);
-  result.previousMonthPending = prevResult;
+  try {
+    // === 各事業所を順番に処理 ===
+    for (const loc of locations) {
+      logger.info('');
+      logger.info(`========== [${loc.name}] 突合開始 ==========`);
 
-  // === Step 4: レポート出力 ===
-  const report = reconciliation.formatReport(result);
+      const reconciliation = new ReconciliationService(sheets);
+      if (staffQualMap) {
+        reconciliation.setStaffQualifications(staffQualMap);
+      }
+
+      // 前月チェック
+      const prevResult = await reconciliation.checkPreviousMonthUnregistered(loc.sheetId);
+      if (prevResult.hasPending) {
+        logger.warn(`[${loc.name}] 前月未登録: ${prevResult.pendingCount} 件`);
+      }
+
+      // 8-1 CSV 取得
+      let csvPath: string | null = null;
+
+      if (cliArgs.skipDownload) {
+        // ローカルキャッシュから検索（事業所コード付き or 汎用）
+        const downloader = new ScheduleCsvDownloaderService(null as unknown as KanamickAuthService);
+        csvPath = downloader.findLocalCsv(cliArgs.month);
+        if (!csvPath) {
+          logger.warn(`[${loc.name}] ローカルに ${cliArgs.month} の 8-1 CSV なし → スキップ`);
+          continue;
+        }
+        logger.info(`[${loc.name}] CSV: ローカルキャッシュ → ${csvPath}`);
+      } else if (browser) {
+        // HAM からダウンロード
+        const auth = new KanamickAuthService({
+          url: kanamickUrl,
+          username: kanamickUser,
+          password: kanamickPass,
+          stationName: loc.stationName,
+          hamOfficeKey: '6',
+          hamOfficeCode: loc.hamOfficeCode,
+        });
+        auth.setContext(browser.browserContext, browser);
+        await auth.login();
+
+        const csvDownloader = new ScheduleCsvDownloaderService(auth);
+        try {
+          csvPath = await csvDownloader.ensureScheduleCsv({
+            targetMonth: cliArgs.month,
+            force: true, // 事業所ごとに新規ダウンロード
+          });
+          logger.info(`[${loc.name}] CSV: ダウンロード完了 → ${csvPath}`);
+        } catch (error) {
+          logger.error(`[${loc.name}] 8-1 CSV ダウンロード失敗: ${(error as Error).message}`);
+          continue;
+        }
+      }
+
+      if (!csvPath) {
+        logger.warn(`[${loc.name}] CSV なし → スキップ`);
+        continue;
+      }
+
+      // 突合実行
+      const result = await reconciliation.reconcile(csvPath, loc.sheetId, tab);
+      result.previousMonthPending = prevResult;
+      allResults.push({ name: loc.name, result });
+
+      // 据点レポート
+      const report = reconciliation.formatReport(result);
+      logger.info(`\n[${loc.name}] ${report}`);
+    }
+  } finally {
+    if (browser) await browser.close();
+  }
+
+  // === 汇总レポート ===
   logger.info('');
-  logger.info(report);
+  logger.info('========================================');
+  logger.info('  全事業所 突合結果サマリー');
+  logger.info('========================================');
 
-  // ファイル出力（--output= 指定時）
+  let totalMissing = 0;
+  let totalExtra = 0;
+  let totalQualMismatch = 0;
+  let totalPrevPending = 0;
+
+  for (const { name, result } of allResults) {
+    const missing = result.missingFromHam.length;
+    const extra = result.extraInHam.length;
+    const qual = result.qualificationMismatches.length;
+    const prev = result.previousMonthPending?.pendingCount || 0;
+    totalMissing += missing;
+    totalExtra += extra;
+    totalQualMismatch += qual;
+    totalPrevPending += prev;
+
+    const status = (missing + extra + qual + prev) === 0 ? '✓' : '⚠';
+    logger.info(
+      `  ${status} ${name}: マッチ=${result.matched}, 欠落=${missing}, 余剰=${extra}, 資格不一致=${qual}` +
+      (prev > 0 ? `, 前月未登録=${prev}` : ''),
+    );
+  }
+
+  logger.info('');
+  logger.info(`  合計: 欠落=${totalMissing}, 余剰=${totalExtra}, 資格不一致=${totalQualMismatch}, 前月未登録=${totalPrevPending}`);
+  logger.info('========================================');
+
+  // ファイル出力
   if (cliArgs.output) {
+    const lines: string[] = ['=== 全事業所 突合レポート ===', ''];
+    for (const { name, result } of allResults) {
+      const reconciliation = new ReconciliationService(sheets);
+      lines.push(`--- ${name} ---`);
+      lines.push(reconciliation.formatReport(result));
+      lines.push('');
+    }
     const outputPath = path.resolve(cliArgs.output);
-    fs.writeFileSync(outputPath, report, 'utf-8');
+    fs.writeFileSync(outputPath, lines.join('\n'), 'utf-8');
     logger.info(`レポート出力: ${outputPath}`);
   }
 
-  // 結果サマリー
-  logger.info('');
-  logger.info('========================================');
-  logger.info('  突合結果サマリー');
-  logger.info(`  Sheets 転記済み: ${result.sheetsTotal} 件`);
-  logger.info(`  HAM 8-1 CSV: ${result.hamTotal} 件`);
-  logger.info(`  マッチ: ${result.matched} 件`);
-  logger.info(`  Sheets→HAM 欠落: ${result.missingFromHam.length} 件`);
-  logger.info(`  HAM 余剰: ${result.extraInHam.length} 件`);
-  logger.info(`  資格不一致: ${result.qualificationMismatches.length} 件`);
-  if (prevResult.hasPending) {
-    logger.info(`  前月未登録: ${prevResult.pendingCount} 件`);
-  }
-  logger.info('========================================');
-
-  // 差異がある場合は exit code 1
-  const hasDiff = result.missingFromHam.length > 0
-    || result.extraInHam.length > 0
-    || result.qualificationMismatches.length > 0
-    || prevResult.hasPending;
-
-  if (hasDiff) {
-    process.exit(1);
-  }
+  const hasDiff = totalMissing + totalExtra + totalQualMismatch + totalPrevPending > 0;
+  if (hasDiff) process.exit(1);
 }
 
 main().catch(error => {

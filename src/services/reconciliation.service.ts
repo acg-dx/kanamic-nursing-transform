@@ -515,10 +515,13 @@ export class ReconciliationService {
   /**
    * リハビリの 20 分セグメントを結合
    *
-   * HAM は訪看Ⅰ５/予訪看Ⅰ５（リハビリ 20 分）を分割して記録するが、
-   * Sheets は全体の訪問時間で記録する。連続する同一患者・同一日のリハビリ
-   * セグメントを結合し、最初のセグメントの開始時刻と最後のセグメントの
-   * 終了時刻で1つのエントリにまとめる。
+   * Kanamic は訪看Ⅰ５/予訪看Ⅰ５（リハビリ 20 分）を分割して記録するが、
+   * Sheets は全体の訪問時間で記録する。
+   *
+   * グループ化: 患者 + 日付 + スタッフ名
+   *   - 同一担当者の連続セグメントを1セッションに結合する
+   *   - 同日に複数のセラピストが同一患者を担当する場合も正しく分離できる
+   *   （例: 藤野 10:40-11:20 と 石坂 11:00-11:40 は別セッションとして扱う）
    */
   private mergeRehabSegments(entries: ScheduleEntry[]): ScheduleEntry[] {
     const isRehab = (e: ScheduleEntry) =>
@@ -529,12 +532,13 @@ export class ReconciliationService {
 
     if (rehab.length === 0) return entries;
 
-    // 同一患者 + 同一日でグループ化（スタッフは無視 — HAM はセラピストを分割する場合あり）
+    // 患者 + 日付 + スタッフ名でグループ化
     const groups = new Map<string, ScheduleEntry[]>();
     for (const e of rehab) {
       const normName = this.normalizeNameForKey(e.patientName);
       const normDate = this.normalizeDate(e.visitDate);
-      const key = `${normName}|${normDate}`;
+      const normStaff = this.normalizeNameForKey(e.staffName);
+      const key = `${normName}|${normDate}|${normStaff}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(e);
     }
