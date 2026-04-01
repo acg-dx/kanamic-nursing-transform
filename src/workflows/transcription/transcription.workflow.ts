@@ -2632,7 +2632,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           inTargetDay = false;
         }
         if (!inTargetDay) continue;
-        if (!text.includes(st)) continue;
+        // 開始時刻チェック: st が「開始時刻」として出現しているか（endTime との誤マッチ防止）。
+        // HAM k2_2 の表示形式 "HH:MM ～ HH:MM" で、開始時刻の後に ～ が続く。
+        // text.includes(st) だと "13:20 ～ 13:40" が st="13:40" にマッチしてしまう (#132871)。
+        // st+"～" または st+" ～" パターンで開始時刻のみマッチさせる。
+        const stRegex = new RegExp(st.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*～');
+        if (!stRegex.test(text)) continue;
         // 終了時刻チェック: endVariants が指定されている場合、いずれかの終了時刻が含まれていることを確認。
         // 一致しない場合は別の訪問エントリ（異なる訪問時間）なのでスキップする。
         // (#122730: 同一開始時刻の別エントリを誤って重複判定する問題の修正)
