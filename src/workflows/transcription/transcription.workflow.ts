@@ -2152,28 +2152,34 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           return r.replace(/[\s\u3000\u00a0]+/g, '').trim();
         }
         const rows = Array.from(document.querySelectorAll('tr'));
+        let foundButDisabled = false;
         for (const row of rows) {
           const rowText = normCjk(row.textContent || '');
           if (!rowText.includes(args.searchName)) continue;
           const selectBtn = row.querySelector('input[name="act_select"][value="選択"]') as HTMLInputElement | null;
-          if (!selectBtn || selectBtn.disabled) continue;
+          if (!selectBtn) continue;
+          // 選択ボタンが disabled → スタッフは存在するが同時間帯に他利用者の予定と重複
+          if (selectBtn.disabled) {
+            foundButDisabled = true;
+            continue;
+          }
           const onclick = selectBtn.getAttribute('onclick') || '';
           const m = onclick.match(/choice\(this,\s*'(\d+)',\s*'([^']+)'(?:,\s*(?:'[^']*'|\d+))?\)/);
           if (m) {
             (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
             if (typeof (window as any).choice === 'function') { // eslint-disable-line @typescript-eslint/no-explicit-any
               (window as any).choice(selectBtn, m[1], m[2], 1); // eslint-disable-line @typescript-eslint/no-explicit-any
-              return { found: true, staffName: m[2] };
+              return { found: true, disabled: false, staffName: m[2] };
             }
             selectBtn.click();
-            return { found: true, staffName: m[2] };
+            return { found: true, disabled: false, staffName: m[2] };
           }
           // regex 不一致でもスタッフ名が一致 → ボタン直接クリックでフォールバック
           (window as any).submited = 0; // eslint-disable-line @typescript-eslint/no-explicit-any
           selectBtn.click();
-          return { found: true, staffName: args.searchName };
+          return { found: true, disabled: false, staffName: args.searchName };
         }
-        return { found: false, staffName: '' };
+        return { found: false, disabled: foundButDisabled, staffName: '' };
       }, { searchName: staffSearchName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
       if (!choiceResult.found) {
@@ -2200,10 +2206,15 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           return { names, total: rows.length };
         }, CJK_VARIANT_MAP_SERIALIZABLE).catch(() => ({ names: [] as string[], total: 0 }));
 
-        logger.warn(`[削除] スタッフ未検出デバッグ: 検索名="${staffSearchName}", 元名="${record.staffName}"`);
+        logger.warn(`I5 スタッフ未検出デバッグ: 検索名="${staffSearchName}", 元名="${record.staffName}"`);
         logger.warn(`従業員リスト (${visibleStaff.names.length}名表示):`);
         for (const name of visibleStaff.names) {
           logger.warn(`  - ${name}`);
+        }
+        if (choiceResult.disabled) {
+          throw new Error(
+            `スタッフ配置不可：担当スタッフ「${record.staffName}」が同時間帯に他利用者の予定と重複しHAMで選択不可（手動配置が必要）`
+          );
         }
         throw new Error(`スタッフ「${record.staffName}」(検索名: ${staffSearchName}) が見つかりません（HAMに登録されていません）`);
       }
