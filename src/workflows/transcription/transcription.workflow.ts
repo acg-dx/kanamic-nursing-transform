@@ -701,6 +701,178 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
+   * 対象レコードのみを再転記する専用メソッド (D-06)
+   * processLocation() の転記ループとは別のパスで、指定レコードのみを処理する。
+   * processLocation() の re-login、CSV再読み込み、スタッフ事前チェック等をスキップし、
+   * 既存の processRecord() を直接呼び出す軽量な再転記パス。
+   */
+  private async retranscribeRecords(
+    records: TranscriptionRecord[],
+    nav: HamNavigator,
+    sheetId: string,
+    tab?: string,
+  ): Promise<{ succeeded: string[]; failed: string[]; nav: HamNavigator }> {
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+
+    for (const record of records) {
+      try {
+        const RECORD_TIMEOUT_MS = 300_000;
+        await withRetry(
+          () => Promise.race([
+            this.processRecord(record, nav, sheetId, tab),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(
+                `再転記タイムアウト（${RECORD_TIMEOUT_MS / 1000}秒）: ${record.recordId}`
+              )), RECORD_TIMEOUT_MS)
+            ),
+          ]),
+          `再転記[${record.recordId}]`,
+          {
+            maxAttempts: 2,
+            baseDelay: 3000,
+            maxDelay: 15000,
+            backoffMultiplier: 2,
+            isNonRetryable: (err) => {
+              const m = err.message;
+              return m.includes('資格情報なし')
+                || m.includes('資格制限')
+                || m.includes('不明なサービス種別')
+                || m.includes('患者が見つかりません')
+                || m.includes('マスタ不備')
+                || m.includes('スタッフ配置不可');
+            },
+          },
+        );
+        succeeded.push(record.recordId);
+        logger.info(`[自動修正] 再転記完了: ${record.patientName} ${record.visitDate}`);
+      } catch (error) {
+        const msg = (error as Error).message;
+        logger.error(`[自動修正] 再転記失敗: ${record.recordId} — ${msg}`);
+        failed.push(record.recordId);
+        nav = await this.tryRecoverToMainMenu(nav);
+      }
+    }
+
+    return { succeeded, failed, nav };
+  }
+
+  /**
+   * 自動修正: 不一致レコードの削除 -> リセット -> 再転記 -> 再検証 -> 結果記録 (FIX-01, FIX-02, FIX-03)
+   * 1サイクルのみ実行 (D-08)。例外発生時はそのレコードをスキップして続行 (D-09)。
+   * FIX-03: 再検証結果のAB/AC列書き込みもこのメソッド内で完結する。
+   */
+  private async runAutoCorrection(
+    location: SheetLocation,
+    mismatches: VerificationMismatch[],
+    records: TranscriptionRecord[],
+    nav: HamNavigator,
+    dryRun: boolean,
+    tab?: string,
+  ): Promise<{ corrected: string[]; failed: string[]; nav: HamNavigator }> {
+    // recordId -> TranscriptionRecord マップ
+    const recordMap = new Map(records.map(r => [r.recordId, r]));
+
+    // D-03/D-04: missingFromHam とそれ以外を分離
+    const toDelete = mismatches.filter(mm => !mm.missingFromHam);
+    const toResetOnly = mismatches.filter(mm => mm.missingFromHam);
+
+    const corrected: string[] = [];
+    const failed: string[] = [];
+    const allResetRecords: TranscriptionRecord[] = [];
+
+    // ── Phase A: HAM 削除 + リセット (D-03: time/service/staff mismatches) ──
+    for (const mm of toDelete) {
+      const record = recordMap.get(mm.recordId);
+      if (!record) {
+        logger.warn(`[自動修正] recordId=${mm.recordId} が records に見つかりません — スキップ`);
+        failed.push(mm.recordId);
+        continue;
+      }
+      if (!record.hamAssignId) {
+        logger.warn(`[自動修正] assignId不明 — 自動修正スキップ: ${record.patientName} ${record.visitDate}`);
+        failed.push(mm.recordId);
+        continue;
+      }
+
+      try {
+        const deleted = await this.deleteHamRecord(nav, record);
+        if (!deleted) {
+          failed.push(mm.recordId);
+          continue;
+        }
+        await this.sheets.resetForRetranscription(location.sheetId, record.rowIndex, tab);
+        allResetRecords.push(record);
+        logger.info(`[自動修正] 削除完了: ${record.patientName} ${record.visitDate}`);
+      } catch (error) {
+        const msg = (error as Error).message;
+        logger.error(`[自動修正] 削除エラー: ${mm.recordId} — ${msg}`);
+        failed.push(mm.recordId);
+        nav = await this.tryRecoverToMainMenu(nav);
+      }
+    }
+
+    // ── Phase B: リセットのみ (D-04: missingInHam — 削除不要) ──
+    for (const mm of toResetOnly) {
+      const record = recordMap.get(mm.recordId);
+      if (!record) {
+        logger.warn(`[自動修正] recordId=${mm.recordId} が records に見つかりません — スキップ`);
+        failed.push(mm.recordId);
+        continue;
+      }
+
+      try {
+        await this.sheets.resetForRetranscription(location.sheetId, record.rowIndex, tab);
+        allResetRecords.push(record);
+        logger.info(`[自動修正] ステータスリセット(missingInHam): ${record.patientName} ${record.visitDate}`);
+      } catch (error) {
+        const msg = (error as Error).message;
+        logger.error(`[自動修正] リセットエラー: ${mm.recordId} — ${msg}`);
+        failed.push(mm.recordId);
+      }
+    }
+
+    // ── Phase C: 再転記 (D-06: 専用メソッド、processLocation再帰ではない) ──
+    if (allResetRecords.length > 0 && !dryRun) {
+      const retranscribeResult = await this.retranscribeRecords(
+        allResetRecords,
+        nav,
+        location.sheetId,
+        tab,
+      );
+      nav = retranscribeResult.nav;
+      corrected.push(...retranscribeResult.succeeded);
+      failed.push(...retranscribeResult.failed);
+    }
+
+    // ── Phase D: 再検証 + 結果記録 (FIX-03) ──
+    if (corrected.length > 0) {
+      const freshRecords = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
+      await this.runVerification(location, freshRecords, tab);
+      logger.info(`[自動修正] 再検証完了`);
+    }
+
+    // ── Phase E: 修正失敗レコードの AC列記録 (FIX-03) ──
+    for (const recordId of failed) {
+      const record = recordMap.get(recordId);
+      if (!record) continue;
+      try {
+        await this.sheets.writeVerificationStatus(
+          location.sheetId,
+          record.rowIndex,
+          new Date().toISOString().replace(/\.\d{3}Z$/, ''),
+          'auto_correction_failed',
+          tab,
+        );
+      } catch (e) {
+        logger.warn(`修正失敗ステータス書き込みエラー: ${(e as Error).message}`);
+      }
+    }
+
+    return { corrected, failed, nav };
+  }
+
+  /**
    * 重複ペアの跨レコードバリデーション
    *
    * 同一キー（患者名+日付+開始時刻+終了時刻）のグループで N列=重複 のレコードがあり:
