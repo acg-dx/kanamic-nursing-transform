@@ -55,6 +55,10 @@ export interface TranscriptionRecord {
   recordLocked: boolean;
   // AA(26): HAM assignId（転記時に保存、削除時に使用）
   hamAssignId?: string;
+  // AB(27): 検証タイムスタンプ (ISO format, e.g. "2026-04-06T13:45:00")
+  verifiedAt?: string;
+  // AC(28): 検証エラー詳細 (e.g. "time:endTime,service:serviceCode" or "missing_in_ham")
+  verificationError?: string;
 }
 
 /** 削除Sheet的记录 */
