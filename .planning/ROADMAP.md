@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. HAMに存在するがSheetsにないレコード（extraInHam）を検出・一覧できる（REC-05）
 **Plans:** 2 plans
 Plans:
-- [ ] 01-01-PLAN.md — CSV日付範囲ダウンロード拡張 + 検証日付範囲計算ヘルパー
+- [x] 01-01-PLAN.md — CSV日付範囲ダウンロード拡張 + 検証日付範囲計算ヘルパー
 - [ ] 01-02-PLAN.md — ReconciliationService検証メソッド + 5つのフィールドレベルチェック
 
 ### Phase 2: ワークフロー統合

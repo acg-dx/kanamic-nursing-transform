@@ -12,8 +12,8 @@
 
 ### CSV取得 (CSV Download)
 
-- [ ] **CSV-01**: 転記と同一HAMセッション内で8-1 CSVをダウンロードする
-- [ ] **CSV-02**: 未検証レコードの日付範囲に基づいてCSVダウンロード範囲を決定する
+- [x] **CSV-01**: 転記と同一HAMセッション内で8-1 CSVをダウンロードする
+- [x] **CSV-02**: 未検証レコードの日付範囲に基づいてCSVダウンロード範囲を決定する
 
 ### 突合検証 (Reconciliation Checks)
 
@@ -65,8 +65,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CSV-01 | Phase 1 | Pending |
-| CSV-02 | Phase 1 | Pending |
+| CSV-01 | Phase 1 | Complete |
+| CSV-02 | Phase 1 | Complete |
 | REC-01 | Phase 1 | Pending |
 | REC-02 | Phase 1 | Pending |
 | REC-03 | Phase 1 | Pending |
