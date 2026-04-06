@@ -43,7 +43,10 @@ Plans:
   3. 検証済みレコードにはタイムスタンプが書き込まれ、次回実行でスキップされる
   4. エラーレコードにはエラー詳細（不一致フィールド・期待値・実際値）がSheetsに記録される
   5. 検証完了後、事業所ごとに「チェック件数・一致件数・不一致件数・extraInHam件数」がコンソールに出力される
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — データ層拡張: TranscriptionRecord型 + SpreadsheetService検証書き込みメソッド
+- [ ] 02-02-PLAN.md — ワークフロー統合: processLocationに検証ステップ + コンソール報告
 
 ### Phase 3: 自動修正
 **Goal**: 不一致が確認されたレコードが自動的に削除・再転記・再検証され、手動介入なしに修正が完了する
@@ -63,5 +66,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 突合検証コア | 0/2 | Planning complete | - |
-| 2. ワークフロー統合 | 0/? | Not started | - |
+| 2. ワークフロー統合 | 0/2 | Planning complete | - |
 | 3. 自動修正 | 0/? | Not started | - |
