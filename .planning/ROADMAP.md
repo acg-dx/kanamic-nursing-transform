@@ -58,8 +58,8 @@ Plans:
   3. 再転記後に再度検証が実行され、修正成功/失敗の結果がコンソールとSheetsに記録される
 **Plans:** 2 plans
 Plans:
-- [ ] 03-01-PLAN.md — 自動修正コア: HAM削除 + ステータスリセット + 再転記メソッド
-- [ ] 03-02-PLAN.md — processLocation統合: 修正トリガー + 再検証 + 結果レポート
+- [x] 03-01-PLAN.md — 自動修正コア: HAM削除 + ステータスリセット + 再転記メソッド
+- [x] 03-02-PLAN.md — processLocation統合: 修正トリガー + 再検証 + 結果レポート
 
 ## Progress
 
