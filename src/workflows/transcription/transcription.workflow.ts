@@ -51,6 +51,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   private smarthr: SmartHRService | null = null;
   private staffSync: StaffSyncService | null = null;
   private hamRegistrationState = new Map<string, boolean>();
+  /** D-08: 自動修正サイクル中フラグ（無限ループ防止） */
+  private _correctionCycleActive = false;
 
   /** CSV利用者マスタを設定 */
   setPatientMaster(master: PatientMasterService): void {
@@ -424,6 +426,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 転記後の最新レコードを再取得（新たに「転記済み」になったレコードを含む）
     const freshRecords = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
     const verificationOutcome = await this.runVerification(location, freshRecords, tab);
+
     // D-10: 検証スキップ情報を WorkflowResult に含める
     if (!verificationOutcome.ran && verificationOutcome.error) {
       errors.push({
@@ -433,6 +436,51 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         recoverable: false,
         timestamp: new Date().toISOString(),
       });
+    }
+
+    // ── 自動修正 (FIX-01, FIX-02, FIX-03): D-08 1サイクルのみ ──
+    if (
+      verificationOutcome.ran &&
+      verificationOutcome.result &&
+      verificationOutcome.result.mismatches.length > 0 &&
+      !this._correctionCycleActive &&
+      !dryRun
+    ) {
+      this._correctionCycleActive = true;
+      try {
+        // D-05: extraInHam は修正対象外 — mismatches のみ処理
+        const correctionResult = await this.runAutoCorrection(
+          location,
+          verificationOutcome.result.mismatches,
+          freshRecords,
+          nav,
+          dryRun,
+          tab,
+        );
+        // Update nav reference (may have been recovered during correction)
+        nav = correctionResult.nav;
+
+        // Log correction summary
+        this.logCorrectionSummary(
+          location.name,
+          correctionResult.corrected,
+          correctionResult.failed,
+          verificationOutcome.result.mismatches,
+        );
+      } catch (error) {
+        // D-09: 自動修正全体が失敗しても転記ワークフローは完了扱い
+        const msg = (error as Error).message;
+        logger.warn(`[${location.name}] 自動修正でエラーが発生しました: ${msg}`);
+        errors.push({
+          recordId: 'auto-correction',
+          message: `自動修正エラー: ${msg}`,
+          category: 'system' as const,
+          recoverable: false,
+          timestamp: new Date().toISOString(),
+        });
+      } finally {
+        this._correctionCycleActive = false;
+      }
     }
 
     return {
@@ -570,6 +618,32 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // D-08: extraInHam (logger.info — 情報レベル)
     for (const extra of result.extraInHam) {
       logger.info(`  extraInHam: ${extra.patientName} ${extra.visitDate}`);
+    }
+    logger.info('─'.repeat(50));
+  }
+
+  /**
+   * 自動修正サマリーをコンソールに出力する
+   */
+  private logCorrectionSummary(
+    locationName: string,
+    corrected: string[],
+    failed: string[],
+    originalMismatches: VerificationMismatch[],
+  ): void {
+    logger.info('─'.repeat(50));
+    logger.info(`[${locationName}] 自動修正サマリー:`);
+    logger.info(`  対象: ${originalMismatches.length}件`);
+    logger.info(`  修正成功: ${corrected.length}件`);
+    logger.info(`  修正失敗: ${failed.length}件`);
+
+    if (failed.length > 0) {
+      for (const id of failed) {
+        const mm = originalMismatches.find(m => m.recordId === id);
+        if (mm) {
+          logger.warn(`  修正失敗: ${mm.patientName} ${mm.visitDate} (${id})`);
+        }
+      }
     }
     logger.info('─'.repeat(50));
   }
