@@ -56,7 +56,10 @@ Plans:
   1. 不一致が確認されたレコードがDeletionWorkflow経由でHAMから削除される（手動削除は発生しない）
   2. 削除後、対象レコードが自動で再転記される（既存のTranscriptionWorkflowを再利用）
   3. 再転記後に再度検証が実行され、修正成功/失敗の結果がコンソールとSheetsに記録される
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — 自動修正コア: HAM削除 + ステータスリセット + 再転記メソッド
+- [ ] 03-02-PLAN.md — processLocation統合: 修正トリガー + 再検証 + 結果レポート
 
 ## Progress
 
@@ -65,6 +68,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 突合検証コア | 0/2 | Planning complete | - |
-| 2. ワークフロー統合 | 0/2 | Planning complete | - |
-| 3. 自動修正 | 0/? | Not started | - |
+| 1. 突合検証コア | 2/2 | Complete | - |
+| 2. ワークフロー統合 | 2/2 | Complete | - |
+| 3. 自動修正 | 0/2 | Planning complete | - |
