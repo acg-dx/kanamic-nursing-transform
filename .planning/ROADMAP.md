@@ -46,7 +46,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 02-01-PLAN.md — データ層拡張: TranscriptionRecord型 + SpreadsheetService検証書き込みメソッド
-- [ ] 02-02-PLAN.md — ワークフロー統合: processLocationに検証ステップ + コンソール報告
+- [x] 02-02-PLAN.md — ワークフロー統合: processLocationに検証ステップ + コンソール報告
 
 ### Phase 3: 自動修正
 **Goal**: 不一致が確認されたレコードが自動的に削除・再転記・再検証され、手動介入なしに修正が完了する
