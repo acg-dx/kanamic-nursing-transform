@@ -24,6 +24,7 @@
  */
 import fs from 'fs';
 import { logger } from '../core/logger';
+import { normalizeCjkName } from '../core/cjk-normalize';
 import type { SpreadsheetService } from './spreadsheet.service';
 import type { TranscriptionRecord } from '../types/spreadsheet.types';
 
@@ -100,6 +101,180 @@ export interface PreviousMonthPendingResult {
     staffName: string;
     transcriptionFlag: string;
   }>;
+}
+
+// ─── 検証結果型 (Phase 1) ───
+
+/** フィールド別不一致の詳細（D-06: 1レコード1オブジェクトに全mismatch集約） */
+export interface VerificationMismatch {
+  /** Sheets レコードの情報 */
+  recordId: string;
+  patientName: string;
+  visitDate: string;
+  startTime: string;
+  endTime: string;
+  staffName: string;
+  sheetsServiceType: string;  // `${serviceType1}/${serviceType2}`
+
+  /** REC-01: HAM に存在しない */
+  missingFromHam: boolean;
+
+  /** REC-02: 終了時刻の不一致（D-03: 完全一致、誤差許容なし） */
+  timeMismatch?: {
+    sheetsEndTime: string;
+    hamEndTime: string;
+  };
+
+  /** REC-03: サービス種類/内容の不一致（D-04: 種類+コード両方比較） */
+  serviceMismatch?: {
+    sheetsServiceType1: string;
+    sheetsServiceType2: string;
+    hamServiceName: string;
+    hamServiceContent: string;
+    description: string;
+  };
+
+  /** REC-04: スタッフ配置の不一致（D-05: CJK正規化後の姓名+資格） */
+  staffMismatch?: {
+    sheetsStaffName: string;
+    hamStaffName: string;
+    qualificationIssue?: string;
+  };
+}
+
+/** REC-05: HAM にあるが Sheets にないレコード */
+export interface ExtraInHamRecord {
+  patientName: string;
+  visitDate: string;
+  startTime: string;
+  endTime: string;
+  staffName: string;
+  serviceName: string;
+  serviceContent: string;
+}
+
+/** verify() の戻り値 */
+export interface VerificationResult {
+  /** Sheets 検証対象レコード数 */
+  sheetsTotal: number;
+  /** HAM CSV レコード数（フィルタ・リハビリ結合後） */
+  hamTotal: number;
+  /** 完全一致レコード数 */
+  matched: number;
+  /** フィールド別不一致あり（REC-01〜REC-04） */
+  mismatches: VerificationMismatch[];
+  /** HAM にあるが Sheets にない（REC-05） */
+  extraInHam: ExtraInHamRecord[];
+}
+
+// ─── 検証ヘルパー (Phase 1) ───
+
+/** 時刻正規化 (HH:MM or H:MM → HH:MM) */
+function normalizeTimeForVerify(time: string): string {
+  if (!time) return '';
+  const m = time.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return '';
+  return `${m[1].padStart(2, '0')}:${m[2]}`;
+}
+
+/**
+ * 終了時刻の不一致チェック（D-03: 完全一致）
+ * @returns 不一致がある場合は { sheetsEndTime, hamEndTime }、一致なら undefined
+ */
+export function checkTimeMismatch(
+  sheetsEndTime: string,
+  hamEndTime: string,
+): { sheetsEndTime: string; hamEndTime: string } | undefined {
+  const normSheets = normalizeTimeForVerify(sheetsEndTime);
+  const normHam = normalizeTimeForVerify(hamEndTime);
+  if (!normSheets || !normHam) return undefined;  // 片方がない場合はスキップ
+  if (normSheets === normHam) return undefined;    // 完全一致
+  return { sheetsEndTime: normSheets, hamEndTime: normHam };
+}
+
+/**
+ * サービス種類/内容の不一致チェック（D-04）
+ * Adapted from run-full-reconciliation.ts checkServiceMismatch()
+ * @returns 不一致がある場合は description 付きオブジェクト、一致なら undefined
+ */
+export function checkServiceMismatch(
+  sheetsRecord: { serviceType1: string; serviceType2: string },
+  hamEntry: { serviceName: string; serviceContent: string },
+): { sheetsServiceType1: string; sheetsServiceType2: string; hamServiceName: string; hamServiceContent: string; description: string } | undefined {
+  const st1 = sheetsRecord.serviceType1;
+  const hamService = hamEntry.serviceContent;
+  const hamType = hamEntry.serviceName;
+
+  if (!hamService && !hamType) return undefined;
+
+  const sheetsIsMedical = st1 === '医療' || st1 === '精神医療';
+  const sheetsIsKaigo = st1 === '介護';
+  const hamIsKaigoHoukanService = /訪看Ⅰ[１-５]|予訪看/.test(hamService);
+  const hamIsMedicalTherapy = hamService.includes('療養費') || hamService.includes('精神科');
+
+  // I5 rehab -- ambiguous insurance type, skip per D-08
+  if (hamService.includes('Ⅰ５') || hamService.includes('I5')) return undefined;
+
+  // Match cases
+  if (sheetsIsKaigo && hamIsKaigoHoukanService) return undefined;
+  if (sheetsIsMedical && hamIsMedicalTherapy) return undefined;
+
+  // Cross-type mismatches
+  if (sheetsIsMedical && hamIsKaigoHoukanService) {
+    return {
+      sheetsServiceType1: st1,
+      sheetsServiceType2: sheetsRecord.serviceType2,
+      hamServiceName: hamType,
+      hamServiceContent: hamService,
+      description: `保険種類不一致: Sheets=${st1} だが HAM は介護保険サービス (${hamService})`,
+    };
+  }
+  if (sheetsIsKaigo && hamIsMedicalTherapy) {
+    return {
+      sheetsServiceType1: st1,
+      sheetsServiceType2: sheetsRecord.serviceType2,
+      hamServiceName: hamType,
+      hamServiceContent: hamService,
+      description: `保険種類不一致: Sheets=${st1} だが HAM は医療保険サービス (${hamService})`,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * スタッフ配置の不一致チェック（D-05: CJK正規化後の姓名一致 + 資格）
+ * @returns 不一致がある場合はオブジェクト、一致なら undefined
+ */
+export function checkStaffMismatch(
+  sheetsStaffName: string,
+  hamStaffName: string,
+  hamServiceContent: string,
+  staffQualifications: Map<string, string>,
+): { sheetsStaffName: string; hamStaffName: string; qualificationIssue?: string } | undefined {
+  const normSheets = normalizeCjkName(sheetsStaffName);
+  const normHam = normalizeCjkName(hamStaffName);
+
+  // Name mismatch
+  if (normSheets !== normHam) {
+    return { sheetsStaffName, hamStaffName };
+  }
+
+  // Name matches -- check qualification (D-05)
+  const actualQual = staffQualifications.get(normHam);
+  if (actualQual) {
+    const isJun = actualQual === '准看護師';
+    const hasJun = hamServiceContent.includes('准');
+    if ((isJun && !hasJun) || (!isJun && hasJun)) {
+      return {
+        sheetsStaffName,
+        hamStaffName,
+        qualificationIssue: `${hamStaffName} は ${actualQual} だが HAM サービス内容は「${hamServiceContent}」`,
+      };
+    }
+  }
+
+  return undefined;
 }
 
 // ─── フィルタリング設定 ───
