@@ -45,7 +45,7 @@ Plans:
   5. 検証完了後、事業所ごとに「チェック件数・一致件数・不一致件数・extraInHam件数」がコンソールに出力される
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — データ層拡張: TranscriptionRecord型 + SpreadsheetService検証書き込みメソッド
+- [x] 02-01-PLAN.md — データ層拡張: TranscriptionRecord型 + SpreadsheetService検証書き込みメソッド
 - [ ] 02-02-PLAN.md — ワークフロー統合: processLocationに検証ステップ + コンソール報告
 
 ### Phase 3: 自動修正

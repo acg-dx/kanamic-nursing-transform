@@ -31,8 +31,8 @@
 
 ### ステータス管理 (Status Management)
 
-- [ ] **STS-01**: 検証済みレコードにフラグ/タイムスタンプを記録する
-- [ ] **STS-02**: 検証エラーのレコードにエラー詳細を記録する
+- [x] **STS-01**: 検証済みレコードにフラグ/タイムスタンプを記録する
+- [x] **STS-02**: 検証エラーのレコードにエラー詳細を記録する
 
 ### レポート (Reporting)
 
@@ -74,8 +74,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REC-05 | Phase 1 | Complete |
 | VER-01 | Phase 2 | Pending |
 | VER-02 | Phase 2 | Pending |
-| STS-01 | Phase 2 | Pending |
-| STS-02 | Phase 2 | Pending |
+| STS-01 | Phase 2 | Complete |
+| STS-02 | Phase 2 | Complete |
 | RPT-01 | Phase 2 | Pending |
 | FIX-01 | Phase 3 | Pending |
 | FIX-02 | Phase 3 | Pending |
