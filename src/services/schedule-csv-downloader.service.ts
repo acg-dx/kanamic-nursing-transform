@@ -18,6 +18,75 @@ import path from 'path';
 import fs from 'fs';
 import { logger } from '../core/logger';
 import type { KanamickAuthService } from './kanamick-auth.service';
+import type { TranscriptionRecord } from '../types/spreadsheet.types';
+
+// ─── Types ───
+
+export interface VerificationDateRange {
+  /** 対象年月 (YYYYMM) */
+  targetMonth: string;
+  /** 開始日 (DD, ゼロパディング) */
+  startDay: string;
+  /** 終了日 (DD, ゼロパディング) */
+  endDay: string;
+}
+
+// ─── Helpers ───
+
+/**
+ * 未検証レコードの訪問日から CSV ダウンロード範囲を計算する。
+ * 複数月にまたがる場合は月ごとに分割して返す。
+ *
+ * @param records 転記済みレコード（transcriptionFlag === '転記済み' のみ処理）
+ * @returns 月別の日付範囲配列。レコードなしの場合は null。
+ */
+export function computeVerificationDateRange(
+  records: TranscriptionRecord[],
+): VerificationDateRange[] | null {
+  const DATE_PATTERN = /(\d{4})\/?(\d{2})\/?(\d{2})/;
+
+  // 転記済みレコードのみフィルタ
+  const qualified = records.filter(r => r.transcriptionFlag === '転記済み');
+  if (qualified.length === 0) return null;
+
+  // 月ごとにグルーピング: Map<YYYYMM, day[]>
+  const monthGroups = new Map<string, number[]>();
+
+  for (const record of qualified) {
+    const match = DATE_PATTERN.exec(record.visitDate);
+    if (!match) continue;
+
+    const [, yyyy, mm, dd] = match;
+    const monthKey = `${yyyy}${mm}`;
+    const day = parseInt(dd, 10);
+
+    const existing = monthGroups.get(monthKey);
+    if (existing) {
+      existing.push(day);
+    } else {
+      monthGroups.set(monthKey, [day]);
+    }
+  }
+
+  if (monthGroups.size === 0) return null;
+
+  // 月ごとに min/max day を算出してソート済み配列で返す
+  const ranges: VerificationDateRange[] = [];
+
+  const sortedMonths = Array.from(monthGroups.keys()).sort();
+  for (const monthKey of sortedMonths) {
+    const days = monthGroups.get(monthKey)!;
+    const minDay = Math.min(...days);
+    const maxDay = Math.max(...days);
+    ranges.push({
+      targetMonth: monthKey,
+      startDay: String(minDay).padStart(2, '0'),
+      endDay: String(maxDay).padStart(2, '0'),
+    });
+  }
+
+  return ranges;
+}
 
 export interface ScheduleCsvDownloadOptions {
   /** 対象年月 (YYYYMM 形式, e.g. "202603") */
