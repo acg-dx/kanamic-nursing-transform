@@ -201,6 +201,32 @@ export class SpreadsheetService {
   }
 
   /**
+   * 自動修正のためのステータスリセット (D-07)
+   * T列を空（未転記状態）に、AB列（検証タイムスタンプ）とAC列（検証エラー）をクリアする。
+   */
+  async resetForRetranscription(
+    sheetId: string,
+    rowIndex: number,
+    tab?: string,
+  ): Promise<void> {
+    tab = tab || getCurrentMonthTab();
+    const updates: Array<{ range: string; values: string[][] }> = [
+      { range: `${tab}!${colToLetter(COL_TRANSCRIPTION_FLAG)}${rowIndex}`, values: [['']] },
+      { range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${rowIndex}`, values: [['']] },
+      { range: `${tab}!${colToLetter(COL_VERIFICATION_ERROR)}${rowIndex}`, values: [['']] },
+    ];
+    for (const update of updates) {
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: update.range,
+        valueInputOption: 'RAW',
+        requestBody: { values: update.values },
+      });
+    }
+    logger.debug(`自動修正リセット: row=${rowIndex}, T列=空, AB列=空, AC列=空`);
+  }
+
+  /**
    * 月次Sheet の指定セルを空白にクリアする（汎用）
    * @param column 列文字 (e.g. 'N')
    */
