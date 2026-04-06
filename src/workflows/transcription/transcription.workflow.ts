@@ -38,6 +38,9 @@ import type { TranscriptionRecord } from '../../types/spreadsheet.types';
 import type { SheetLocation } from '../../types/config.types';
 import type { SmartHRService } from '../../services/smarthr.service';
 import type { StaffSyncService } from '../../workflows/staff-sync/staff-sync.workflow';
+import { ReconciliationService } from '../../services/reconciliation.service';
+import type { VerificationResult, VerificationMismatch } from '../../services/reconciliation.service';
+import { ScheduleCsvDownloaderService, computeVerificationDateRange } from '../../services/schedule-csv-downloader.service';
 
 const WORKFLOW_NAME = 'transcription';
 
@@ -417,6 +420,21 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
     }
 
+    // ── 検証ステップ (VER-01): 転記完了後に自動実行 ──
+    // 転記後の最新レコードを再取得（新たに「転記済み」になったレコードを含む）
+    const freshRecords = await this.sheets.getTranscriptionRecords(location.sheetId, tab);
+    const verificationOutcome = await this.runVerification(location, freshRecords, tab);
+    // D-10: 検証スキップ情報を WorkflowResult に含める
+    if (!verificationOutcome.ran && verificationOutcome.error) {
+      errors.push({
+        recordId: 'verification',
+        message: `検証スキップ: ${verificationOutcome.error}`,
+        category: 'system' as const,
+        recoverable: false,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return {
       workflowName: WORKFLOW_NAME,
       locationName: location.name,
@@ -427,6 +445,133 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       errors,
       duration: 0,
     };
+  }
+
+  /**
+   * 転記完了後の自動検証ステップ (VER-01, VER-02, RPT-01)
+   * 各事業所の processLocation() 完了直後に実行される。
+   * エラー発生時は logger.warn で記録し、転記ワークフローは続行する (D-09)。
+   */
+  private async runVerification(
+    location: SheetLocation,
+    records: TranscriptionRecord[],
+    tab?: string,
+  ): Promise<{ ran: boolean; error?: string }> {
+    try {
+      // ── VER-02: 「転記済み」かつ「未検証」のレコードを抽出 ──
+      const unverified = records.filter(
+        r => r.transcriptionFlag === '転記済み' && !r.verifiedAt,
+      );
+      if (unverified.length === 0) {
+        logger.info(`[${location.name}] 検証: 未検証レコードなし — スキップ`);
+        return { ran: true };
+      }
+
+      // ── D-02: 当月タブの未検証レコードの日付範囲でCSV取得 ──
+      const dateRanges = computeVerificationDateRange(unverified);
+      if (!dateRanges || dateRanges.length === 0) {
+        logger.warn(`[${location.name}] 検証: 日付範囲を計算できませんでした — スキップ`);
+        return { ran: false, error: '日付範囲計算失敗' };
+      }
+
+      // D-01: HAMセッションが生きている間にCSVダウンロード
+      const csvDownloader = new ScheduleCsvDownloaderService(this.auth);
+      // 当月のみ (D-02) — dateRanges[0] を使用（当月タブなので通常1エントリ）
+      const dr = dateRanges[0];
+      const csvPath = await csvDownloader.downloadScheduleCsv({
+        targetMonth: dr.targetMonth,
+        startDay: dr.startDay,
+        endDay: dr.endDay,
+        force: true,
+      });
+
+      // ── ReconciliationService.verify() で突合 ──
+      const reconciliation = new ReconciliationService(this.sheets);
+      const result: VerificationResult = await reconciliation.verify(csvPath, unverified);
+
+      // ── STS-01/STS-02: Sheets に検証結果を書き込む ──
+      const now = new Date().toISOString().replace(/\.\d{3}Z$/, '');
+      // 不一致レコードを recordId でルックアップ用マップに変換
+      const mismatchMap = new Map(result.mismatches.map(m => [m.recordId, m]));
+
+      for (const r of unverified) {
+        const mm = mismatchMap.get(r.recordId);
+        // 不一致の場合はエラー詳細、一致の場合は空文字列
+        const errorDetail = mm ? this.formatMismatchError(mm) : '';
+
+        await this.sheets.writeVerificationStatus(
+          location.sheetId,
+          r.rowIndex,
+          now,
+          errorDetail,
+          tab,
+        );
+      }
+
+      // ── RPT-01: コンソール報告 ──
+      this.logVerificationSummary(location.name, result, unverified.length);
+
+      return { ran: true };
+    } catch (error) {
+      // D-09: 検証エラーは転記ワークフローを停止しない
+      const msg = (error as Error).message;
+      logger.warn(`[${location.name}] 検証ステップでエラーが発生しました（転記は正常完了）: ${msg}`);
+      return { ran: false, error: msg };
+    }
+  }
+
+  /**
+   * VerificationMismatch からエラー詳細文字列を生成する。
+   * 例: "missing_in_ham" or "time,service" or "staff"
+   */
+  private formatMismatchError(mm: VerificationMismatch): string {
+    if (mm.missingFromHam) {
+      return 'missing_in_ham';
+    }
+    const parts: string[] = [];
+    if (mm.timeMismatch) {
+      parts.push('time');
+    }
+    if (mm.serviceMismatch) {
+      parts.push('service');
+    }
+    if (mm.staffMismatch) {
+      parts.push('staff');
+    }
+    return parts.length > 0 ? parts.join(',') : 'unknown_mismatch';
+  }
+
+  /**
+   * 検証サマリーをコンソールに出力する (D-06, D-07, D-08)
+   */
+  private logVerificationSummary(
+    locationName: string,
+    result: VerificationResult,
+    checkedCount: number,
+  ): void {
+    // D-06: 事業所ごとのサマリー
+    logger.info('─'.repeat(50));
+    logger.info(`[${locationName}] 検証サマリー:`);
+    logger.info(`  チェック件数: ${checkedCount}`);
+    logger.info(`  一致: ${result.matched}`);
+    logger.info(`  不一致: ${result.mismatches.length}`);
+    logger.info(`  extraInHam: ${result.extraInHam.length}`);
+
+    // D-07: 不一致レコードの詳細 (logger.warn)
+    for (const mm of result.mismatches) {
+      const mismatchTypes: string[] = [];
+      if (mm.missingFromHam) mismatchTypes.push('missing_in_ham');
+      if (mm.timeMismatch) mismatchTypes.push('time');
+      if (mm.serviceMismatch) mismatchTypes.push('service');
+      if (mm.staffMismatch) mismatchTypes.push('staff');
+      logger.warn(`  不一致: ${mm.patientName} ${mm.visitDate} — ${mismatchTypes.join(',')}`);
+    }
+
+    // D-08: extraInHam (logger.info — 情報レベル)
+    for (const extra of result.extraInHam) {
+      logger.info(`  extraInHam: ${extra.patientName} ${extra.visitDate}`);
+    }
+    logger.info('─'.repeat(50));
   }
 
   /**
