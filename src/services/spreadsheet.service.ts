@@ -173,6 +173,34 @@ export class SpreadsheetService {
   }
 
   /**
+   * 検証結果を AB列(検証タイムスタンプ) と AC列(エラー詳細) に書き込む (STS-01, STS-02)
+   * @param verifiedAt ISO タイムスタンプ (e.g. "2026-04-06T13:45:00")
+   * @param verificationError エラー詳細 (空文字列 = 一致, "missing_in_ham" = HAM未存在, "time:endTime,service:serviceCode" = フィールド不一致)
+   */
+  async writeVerificationStatus(
+    sheetId: string,
+    rowIndex: number,
+    verifiedAt: string,
+    verificationError: string,
+    tab?: string,
+  ): Promise<void> {
+    tab = tab || getCurrentMonthTab();
+    const updates: Array<{ range: string; values: string[][] }> = [
+      { range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${rowIndex}`, values: [[verifiedAt]] },
+      { range: `${tab}!${colToLetter(COL_VERIFICATION_ERROR)}${rowIndex}`, values: [[verificationError]] },
+    ];
+    for (const update of updates) {
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: update.range,
+        valueInputOption: 'RAW',
+        requestBody: { values: update.values },
+      });
+    }
+    logger.debug(`検証ステータス書き込み: row=${rowIndex}, verifiedAt=${verifiedAt}, error=${verificationError || '(none)'}`);
+  }
+
+  /**
    * 月次Sheet の指定セルを空白にクリアする（汎用）
    * @param column 列文字 (e.g. 'N')
    */
