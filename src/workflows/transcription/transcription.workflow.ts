@@ -575,6 +575,132 @@ export class TranscriptionWorkflow extends BaseWorkflow {
   }
 
   /**
+   * HAM上の1レコードを assignId で削除する (FIX-01)
+   * DeletionWorkflow.processRecord() の HAM 削除部分を簡略化して再実装。
+   * 削除Sheet操作・重複ペア処理は不要（月次シート行は残す → 再転記で上書き）。
+   */
+  private async deleteHamRecord(
+    nav: HamNavigator,
+    record: TranscriptionRecord,
+  ): Promise<boolean> {
+    // === Step 1: メインメニュー → 業務ガイド → 利用者検索 ===
+    await this.auth.navigateToBusinessGuide();
+    await this.auth.navigateToUserSearch();
+
+    // === Step 2: 年月設定 → 全患者検索 ===
+    const monthStart = toHamMonthStart(record.visitDate);
+    await nav.setSelectValue('searchdate', monthStart);
+    await nav.submitForm({ action: 'act_search', waitForPageId: 'k2_1' });
+    await this.sleep(1000);
+
+    // === Step 3: 患者特定 ===
+    const patientId = await this.findPatientId(nav, record);
+    if (!patientId) {
+      logger.warn(`[自動修正] 患者が見つかりません: ${record.patientName} — 削除スキップ`);
+      return false;
+    }
+
+    // === Step 4: k2_2 へ遷移 ===
+    const k2_1Frame = await nav.getMainFrame('k2_1');
+    await k2_1Frame.evaluate((pid) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const win = window as any;
+      const form = document.forms[0];
+      if (!form) throw new Error('k2_1 form not found');
+      if (typeof win.submitTargetFormEx === 'function') {
+        win.submitTargetFormEx(form, 'k2_2', form.careuserid, pid);
+      } else {
+        win.submited = 0;
+        form.careuserid.value = pid;
+        form.doAction.value = 'k2_2';
+        form.target = 'mainFrame';
+        form.submit();
+      }
+      /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, patientId);
+
+    await nav.waitForMainFrame('k2_2', 15000);
+    await this.sleep(1000);
+
+    // === Step 5: assignId で削除 ===
+    const assignIds = (record.hamAssignId || '').split(',').filter(Boolean);
+    if (assignIds.length === 0) {
+      logger.warn(`[自動修正] assignId が空です: ${record.recordId} — 削除スキップ`);
+      return false;
+    }
+
+    const frame = await nav.getMainFrame('k2_2');
+    let deletedCount = 0;
+
+    for (const assignId of assignIds) {
+      const trimmedId = assignId.trim();
+      if (!trimmedId) continue;
+
+      // 削除ボタンの onclick 属性から record2flag を取得
+      const btnInfo = await frame.evaluate((aid: string) => {
+        const selector = `input[name="act_delete"][onclick*="confirmDelete('${aid}'"]`;
+        const btn = document.querySelector(selector) as HTMLInputElement | null;
+        if (!btn) return { found: false, record2flag: '' };
+        const onclick = btn.getAttribute('onclick') || '';
+        const m = onclick.match(/confirmDelete\(\s*'\d+'\s*,\s*'(\d+)'\s*\)/);
+        return { found: true, record2flag: m ? m[1] : '0' };
+      }, trimmedId);
+
+      if (!btnInfo.found) {
+        logger.warn(`[自動修正] assignId=${trimmedId} の削除ボタンが見つかりません（既に削除済みの可能性）`);
+        continue;
+      }
+
+      if (btnInfo.record2flag === '1') {
+        logger.warn(`[自動修正] 記録書IIが存在するため削除不可: assignId=${trimmedId}`);
+        continue;
+      }
+
+      // submited フラグをリセットして削除ボタンクリック
+      const delBtn = await frame.$(`input[name="act_delete"][onclick*="confirmDelete('${trimmedId}'"]`);
+      if (delBtn) {
+        await frame.evaluate(() => {
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          (window as any).submited = 0;
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+        });
+        await delBtn.click();
+        await this.sleep(2000);
+        deletedCount++;
+      } else {
+        // フォールバック: confirmDelete 直接呼び出し
+        await frame.evaluate((aid: string) => {
+          /* eslint-disable @typescript-eslint/no-explicit-any */
+          const win = window as any;
+          win.submited = 0;
+          if (typeof win.confirmDelete === 'function') {
+            win.confirmDelete(aid, '0');
+          }
+          /* eslint-enable @typescript-eslint/no-explicit-any */
+        }, trimmedId);
+        await this.sleep(2000);
+        deletedCount++;
+      }
+      logger.debug(`[自動修正] assignId=${trimmedId} 削除完了 (${deletedCount}/${assignIds.length})`);
+    }
+
+    if (deletedCount === 0) {
+      logger.warn(`[自動修正] 削除対象が見つかりませんでした: ${record.recordId}`);
+      return false;
+    }
+
+    // === Step 6: 上書き保存 ===
+    await nav.submitForm({
+      action: 'act_update',
+      setLockCheck: true,
+      waitForPageId: 'k2_2',
+    });
+    await this.sleep(2000);
+    logger.info(`[自動修正] HAM削除完了: ${record.patientName} ${record.visitDate} (${deletedCount}件)`);
+    return true;
+  }
+
+  /**
    * 重複ペアの跨レコードバリデーション
    *
    * 同一キー（患者名+日付+開始時刻+終了時刻）のグループで N列=重複 のレコードがあり:
