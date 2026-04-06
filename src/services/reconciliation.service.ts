@@ -456,6 +456,135 @@ export class ReconciliationService {
   }
 
   /**
+   * 8-1 CSV と Sheets レコードのフィールドレベル検証を実行（Phase 1 検証コア）
+   *
+   * 既存の reconcile() が存在性+資格のみチェックするのに対し、
+   * verify() は5つのフィールドレベルチェックを実行する。
+   *
+   * @param csvPath 8-1 スケジュールデータ CSV パス
+   * @param sheetsRecords 検証対象の転記済みレコード（呼び出し元でフィルタ済み）
+   * @returns フィールドレベル検証結果
+   */
+  async verify(
+    csvPath: string,
+    sheetsRecords: TranscriptionRecord[],
+  ): Promise<VerificationResult> {
+    // ── CSV パース + フィルタリング ──
+    const hamEntries = this.parseScheduleCsv(csvPath);
+    const filteredEntries = hamEntries.filter(e => {
+      if (TEST_PATIENT_PATTERNS.some(p => e.patientName.includes(p))) return false;
+      if (e.startTime === '12:00' && e.endTime === '12:00') return false;
+      if (e.serviceContent.includes('超減算') || e.serviceContent.includes('月超')) return false;
+      return true;
+    });
+
+    // ── リハビリ 20 分セグメント結合 ──
+    const mergedEntries = this.mergeRehabSegments(filteredEntries);
+
+    // ── HAM マップ構築 ──
+    const hamMap = new Map<string, ScheduleEntry[]>();
+    for (const entry of mergedEntries) {
+      const key = this.makeMatchKey(entry.patientName, entry.visitDate, entry.startTime);
+      const existing = hamMap.get(key) || [];
+      hamMap.set(key, [...existing, entry]);
+    }
+
+    // ── Sheets レコード走査 + フィールドレベル検証 (D-06: per-record aggregation) ──
+    const mismatches: VerificationMismatch[] = [];
+    const matchedHamKeys = new Set<string>();
+    let matchedCount = 0;
+
+    for (const r of sheetsRecords) {
+      const key = this.makeMatchKey(r.patientName, r.visitDate, r.startTime);
+      const hamRecords = hamMap.get(key);
+
+      if (!hamRecords || hamRecords.length === 0) {
+        // REC-01: missing from HAM
+        mismatches.push({
+          recordId: r.recordId,
+          patientName: r.patientName,
+          visitDate: r.visitDate,
+          startTime: r.startTime,
+          endTime: r.endTime,
+          staffName: r.staffName,
+          sheetsServiceType: `${r.serviceType1}/${r.serviceType2}`,
+          missingFromHam: true,
+        });
+        continue;
+      }
+
+      matchedHamKeys.add(key);
+
+      // Find best matching HAM record (per Pitfall 3: multi-staff visits)
+      // Try exact endTime match first, then first entry
+      const bestHam = hamRecords.find(h =>
+        this.normalizeTime(h.endTime) === this.normalizeTime(r.endTime)
+      ) || hamRecords[0];
+
+      // Build mismatch object (D-06: aggregate all field mismatches)
+      const timeMismatch = checkTimeMismatch(r.endTime, bestHam.endTime);
+      const serviceMismatch = checkServiceMismatch(
+        { serviceType1: r.serviceType1, serviceType2: r.serviceType2 },
+        { serviceName: bestHam.serviceName, serviceContent: bestHam.serviceContent },
+      );
+      const staffMismatch = checkStaffMismatch(
+        r.staffName,
+        bestHam.staffName,
+        bestHam.serviceContent,
+        this.staffQualifications,
+      );
+
+      if (timeMismatch || serviceMismatch || staffMismatch) {
+        mismatches.push({
+          recordId: r.recordId,
+          patientName: r.patientName,
+          visitDate: r.visitDate,
+          startTime: r.startTime,
+          endTime: r.endTime,
+          staffName: r.staffName,
+          sheetsServiceType: `${r.serviceType1}/${r.serviceType2}`,
+          missingFromHam: false,
+          timeMismatch,
+          serviceMismatch,
+          staffMismatch,
+        });
+      } else {
+        matchedCount++;
+      }
+    }
+
+    // ── REC-05: extraInHam detection ──
+    const extraInHam: ExtraInHamRecord[] = [];
+    for (const [key, entries] of hamMap) {
+      if (matchedHamKeys.has(key)) continue;
+      for (const e of entries) {
+        extraInHam.push({
+          patientName: e.patientName,
+          visitDate: e.visitDate,
+          startTime: e.startTime,
+          endTime: e.endTime,
+          staffName: e.staffName,
+          serviceName: e.serviceName,
+          serviceContent: e.serviceContent,
+        });
+      }
+    }
+
+    logger.info(
+      `[検証] Sheets=${sheetsRecords.length}, HAM=${mergedEntries.length}, ` +
+      `一致=${matchedCount}, 不一致=${mismatches.length}, extraInHam=${extraInHam.length}`
+    );
+
+    return {
+      sheetsTotal: sheetsRecords.length,
+      hamTotal: mergedEntries.length,
+      matched: matchedCount,
+      mismatches,
+      extraInHam,
+    };
+  }
+
+  /**
    * 前月の未登録データチェック
    *
    * 当月の転記処理前に前月タブを確認し、未転記レコードがないかを検出する。
