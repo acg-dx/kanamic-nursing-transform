@@ -91,11 +91,15 @@ export function computeVerificationDateRange(
 export interface ScheduleCsvDownloadOptions {
   /** 対象年月 (YYYYMM 形式, e.g. "202603") */
   targetMonth: string;
+  /** 開始日 (DD, デフォルト: '01') — 検証用日付範囲指定 (CSV-02) */
+  startDay?: string;
+  /** 終了日 (DD, デフォルト: 月末日) — 検証用日付範囲指定 (CSV-02) */
+  endDay?: string;
   /** ダウンロード保存先ディレクトリ (デフォルト: ./downloads) */
   downloadDir?: string;
   /** タイムアウト (ms, デフォルト: 120000 — 8-1 CSV は大きいため長めに設定) */
   timeout?: number;
-  /** 強制再ダウンロード (デフォルト: false) */
+  /** 強制再ダウンロード (デフォルト: false, 検証時は true を推奨 — D-02) */
   force?: boolean;
 }
 
@@ -162,7 +166,10 @@ export class ScheduleCsvDownloaderService {
     const month = targetMonth.substring(4, 6);
     const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
 
-    logger.info(`8-1 スケジュール CSV ダウンロード開始: ${year}/${month}/01 〜 ${year}/${month}/${lastDay}`);
+    const actualStartDay = (options.startDay || '01').padStart(2, '0');
+    const actualEndDay = (options.endDay || String(lastDay)).padStart(2, '0');
+
+    logger.info(`8-1 スケジュール CSV ダウンロード開始: ${year}/${month}/${actualStartDay} 〜 ${year}/${month}/${actualEndDay}`);
     const nav = this.auth.navigator;
 
     // === Step 1: メインメニューに戻る + venobox ポップアップ閉じ ===
@@ -186,17 +193,17 @@ export class ScheduleCsvDownloaderService {
     // === Step 3: 期間設定 ===
     const mainFrame = await nav.getMainFrame('k11_1');
 
-    // 開始日: YYYY年MM月01日
+    // 開始日: YYYY年MM月{startDay}日
     await nav.setSelectValue('startdateAttr0', year, mainFrame);
     await nav.setSelectValue('startdateAttr1', month, mainFrame);
-    await nav.setSelectValue('startdateAttr2', '01', mainFrame);
+    await nav.setSelectValue('startdateAttr2', actualStartDay, mainFrame);
 
-    // 終了日: YYYY年MM月{lastDay}日
+    // 終了日: YYYY年MM月{endDay}日
     await nav.setSelectValue('enddateAttr0', year, mainFrame);
     await nav.setSelectValue('enddateAttr1', month, mainFrame);
-    await nav.setSelectValue('enddateAttr2', String(lastDay).padStart(2, '0'), mainFrame);
+    await nav.setSelectValue('enddateAttr2', actualEndDay, mainFrame);
 
-    logger.debug(`期間設定完了: ${year}/${month}/01 〜 ${year}/${month}/${lastDay}`);
+    logger.debug(`期間設定完了: ${year}/${month}/${actualStartDay} 〜 ${year}/${month}/${actualEndDay}`);
 
     // === Step 4: CSV出力ボタンクリック → ダウンロード待機 ===
     const hamPage = nav.hamPage;
@@ -230,7 +237,11 @@ export class ScheduleCsvDownloaderService {
 
     const suggestedName = download.suggestedFilename() || `schedule_8-1_${targetMonth}.csv`;
     // HAM が生成するファイル名を保持しつつ、ローカルキャッシュ用に別名で保存
-    const savePath = path.join(downloadDir, `schedule_8-1_${targetMonth}.csv`);
+    // 日付範囲が指定されている場合はサフィックスを付与（検証用ダウンロードの識別）
+    const dayRangeSuffix = (options.startDay || options.endDay)
+      ? `_${actualStartDay}-${actualEndDay}`
+      : '';
+    const savePath = path.join(downloadDir, `schedule_8-1_${targetMonth}${dayRangeSuffix}.csv`);
     await download.saveAs(savePath);
 
     const fileSize = fs.statSync(savePath).size;
