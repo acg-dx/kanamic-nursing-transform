@@ -28,7 +28,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Sheets「転記済み」レコードのうちCSVに存在しないものを検出できる（REC-01）
   4. 訪問日・開始時刻・終了時刻の不一致、サービス種類・コードの不一致、スタッフ配置の不一致をそれぞれ個別に検出できる（REC-02, REC-03, REC-04）
   5. HAMに存在するがSheetsにないレコード（extraInHam）を検出・一覧できる（REC-05）
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — CSV日付範囲ダウンロード拡張 + 検証日付範囲計算ヘルパー
+- [ ] 01-02-PLAN.md — ReconciliationService検証メソッド + 5つのフィールドレベルチェック
 
 ### Phase 2: ワークフロー統合
 **Goal**: 各事業所の転記完了直後に自動で検証が実行され、検証結果がSheetsに記録されコンソールに出力される
@@ -59,6 +62,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 突合検証コア | 0/? | Not started | - |
+| 1. 突合検証コア | 0/2 | Planning complete | - |
 | 2. ワークフロー統合 | 0/? | Not started | - |
 | 3. 自動修正 | 0/? | Not started | - |
