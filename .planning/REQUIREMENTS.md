@@ -17,11 +17,11 @@
 
 ### 突合検証 (Reconciliation Checks)
 
-- [ ] **REC-01**: レコード存在性 — Sheets「転記済み」がHAM CSVに存在するか確認
-- [ ] **REC-02**: 時間一致性 — 訪問日・開始時刻・終了時刻の一致を確認
-- [ ] **REC-03**: サービス内容 — サービス種類・コードの一致を確認
-- [ ] **REC-04**: スタッフ配置 — 配置スタッフの一致を確認
-- [ ] **REC-05**: extraInHam検出 — HAMに存在するがSheetsにないレコードを検出
+- [x] **REC-01**: レコード存在性 — Sheets「転記済み」がHAM CSVに存在するか確認
+- [x] **REC-02**: 時間一致性 — 訪問日・開始時刻・終了時刻の一致を確認
+- [x] **REC-03**: サービス内容 — サービス種類・コードの一致を確認
+- [x] **REC-04**: スタッフ配置 — 配置スタッフの一致を確認
+- [x] **REC-05**: extraInHam検出 — HAMに存在するがSheetsにないレコードを検出
 
 ### 自動修正 (Auto-Correction)
 
@@ -67,11 +67,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | CSV-01 | Phase 1 | Complete |
 | CSV-02 | Phase 1 | Complete |
-| REC-01 | Phase 1 | Pending |
-| REC-02 | Phase 1 | Pending |
-| REC-03 | Phase 1 | Pending |
-| REC-04 | Phase 1 | Pending |
-| REC-05 | Phase 1 | Pending |
+| REC-01 | Phase 1 | Complete |
+| REC-02 | Phase 1 | Complete |
+| REC-03 | Phase 1 | Complete |
+| REC-04 | Phase 1 | Complete |
+| REC-05 | Phase 1 | Complete |
 | VER-01 | Phase 2 | Pending |
 | VER-02 | Phase 2 | Pending |
 | STS-01 | Phase 2 | Pending |

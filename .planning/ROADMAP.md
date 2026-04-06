@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 Plans:
 - [x] 01-01-PLAN.md — CSV日付範囲ダウンロード拡張 + 検証日付範囲計算ヘルパー
-- [ ] 01-02-PLAN.md — ReconciliationService検証メソッド + 5つのフィールドレベルチェック
+- [x] 01-02-PLAN.md — ReconciliationService検証メソッド + 5つのフィールドレベルチェック
 
 ### Phase 2: ワークフロー統合
 **Goal**: 各事業所の転記完了直後に自動で検証が実行され、検証結果がSheetsに記録されコンソールに出力される
