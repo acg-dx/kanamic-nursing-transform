@@ -456,7 +456,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     location: SheetLocation,
     records: TranscriptionRecord[],
     tab?: string,
-  ): Promise<{ ran: boolean; error?: string }> {
+  ): Promise<{ ran: boolean; error?: string; result?: VerificationResult }> {
     try {
       // ── VER-02: 「転記済み」かつ「未検証」のレコードを抽出 ──
       const unverified = records.filter(
@@ -511,7 +511,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       // ── RPT-01: コンソール報告 ──
       this.logVerificationSummary(location.name, result, unverified.length);
 
-      return { ran: true };
+      return { ran: true, result };
     } catch (error) {
       // D-09: 検証エラーは転記ワークフローを停止しない
       const msg = (error as Error).message;
