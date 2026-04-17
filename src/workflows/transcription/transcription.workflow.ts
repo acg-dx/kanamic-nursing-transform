@@ -29,17 +29,17 @@ import { PatientMasterService } from '../../services/patient-master.service';
 import { PatientCsvDownloaderService } from '../../services/patient-csv-downloader.service';
 import type { ServiceCodeResult } from '../../services/service-code-resolver';
 import { getTimetype, getTimePeriod, parseTime, toHamDate, toHamMonthStart, calcDurationMinutes, calcCorrectedEndTime } from '../../services/time-utils';
-import { CorrectionSheetSync } from '../correction/correction-sheet-sync';
+import { CorrectionSheetSync, parseChangeDetail, isKeyFieldChange, getKeyFieldName, buildOldKeyValues } from '../correction/correction-sheet-sync';
 import type { Frame, Page } from 'playwright';
 import type { HamNavigator } from '../../core/ham-navigator';
 import { PAGE_DEATH_KEYWORDS, isPageCrashError } from '../../core/ham-error-keywords';
 import type { WorkflowContext, WorkflowResult, WorkflowError, TranscriptionStatus } from '../../types/workflow.types';
-import type { TranscriptionRecord } from '../../types/spreadsheet.types';
+import type { TranscriptionRecord, CorrectionRecord } from '../../types/spreadsheet.types';
 import type { SheetLocation } from '../../types/config.types';
 import type { SmartHRService } from '../../services/smarthr.service';
 import type { StaffSyncService } from '../../workflows/staff-sync/staff-sync.workflow';
 import { ReconciliationService } from '../../services/reconciliation.service';
-import type { VerificationResult, VerificationMismatch } from '../../services/reconciliation.service';
+import type { VerificationResult, VerificationMismatch, ExtraInHamRecord } from '../../services/reconciliation.service';
 import { ScheduleCsvDownloaderService, computeVerificationDateRange } from '../../services/schedule-csv-downloader.service';
 
 const WORKFLOW_NAME = 'transcription';
@@ -171,14 +171,26 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     logger.info(`${location.name}: 対象レコード ${targets.length}/${records.length}件`);
 
     if (targets.length === 0) {
+      // 転記対象がなくても検証ステップは実行（未検証の転記済みレコードを突合）
+      const verificationOutcome = await this.runVerification(location, records, tab);
+      const errors: WorkflowError[] = [];
+      if (!verificationOutcome.ran && verificationOutcome.error) {
+        errors.push({
+          recordId: 'verification',
+          message: `検証スキップ: ${verificationOutcome.error}`,
+          category: 'system' as const,
+          recoverable: false,
+          timestamp: new Date().toISOString(),
+        });
+      }
       return {
         workflowName: WORKFLOW_NAME,
         locationName: location.name,
         success: true,
         totalRecords: records.length,
         processedRecords: 0,
-        errorRecords: 0,
-        errors: [],
+        errorRecords: errors.length,
+        errors,
         duration: 0,
       };
     }
@@ -329,7 +341,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
                 || m.includes('不明なサービス種別')
                 || m.includes('患者が見つかりません')
                 || m.includes('マスタ不備')
-                || m.includes('スタッフ配置不可');
+                || m.includes('スタッフ配置不可')
+                || m.includes('開始時間以下のためスキップ');
             },
             onRetry: async (attempt, _err) => {
               // エラー後のリトライ: まずブラウザ/セッション健全性を確認し、
@@ -376,12 +389,22 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         processedRecords++;
         consecutiveErrors = 0; // 成功でリセット
 
-        // 修正管理シートの該当レコードを「処理済み」にマーク
+        // 修正管理シートの該当レコードを「処理済み」にマーク（月次反映を検証してから）
         const corrRows = correctionMap.get(record.recordId);
         if (corrRows && corrRows.length > 0) {
           try {
-            await corrSync.markProcessed(location.sheetId, corrRows);
-            logger.info(`修正管理処理済みマーク: recordId=${record.recordId} (${corrRows.length}件)`);
+            const verified = await this.sheets.verifyMonthlySheetStatus(
+              location.sheetId, record.rowIndex, tab,
+            );
+            if (verified.transcriptionFlag !== '転記済み') {
+              logger.warn(
+                `修正管理処理済みマーク保留: recordId=${record.recordId} — ` +
+                `月次シートの転記フラグが「${verified.transcriptionFlag ?? '(空)'}」（期待値: 転記済み）`,
+              );
+            } else {
+              await corrSync.markProcessed(location.sheetId, corrRows);
+              logger.info(`修正管理処理済みマーク: recordId=${record.recordId} (${corrRows.length}件, 月次検証OK)`);
+            }
           } catch (markErr) {
             logger.warn(`修正管理処理済みマーク失敗（次回再処理される）: ${(markErr as Error).message}`);
           }
@@ -510,13 +533,23 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       const unverified = records.filter(
         r => r.transcriptionFlag === '転記済み' && !r.verifiedAt,
       );
-      if (unverified.length === 0) {
-        logger.info(`[${location.name}] 検証: 未検証レコードなし — スキップ`);
+
+      // ── COR-01 前段: 修正管理に未処理レコードがあるか事前チェック ──
+      const corrSync = new CorrectionSheetSync(this.sheets);
+      const pendingCorrections = await corrSync.getUnprocessedCorrections(location.sheetId);
+
+      if (unverified.length === 0 && pendingCorrections.length === 0) {
+        logger.info(`[${location.name}] 検証: 未検証レコードなし・修正管理未処理なし — スキップ`);
         return { ran: true };
       }
 
-      // ── D-02: 当月タブの未検証レコードの日付範囲でCSV取得 ──
-      const dateRanges = computeVerificationDateRange(unverified);
+      // ── D-02: 日付範囲算出 ──
+      // unverified + 修正管理対象レコードを合わせて日付範囲を算出（CSV が全対象をカバーするように）
+      const corrTargetRecords = pendingCorrections.length > 0
+        ? this.correctionRecordsToFakeTranscription(pendingCorrections, records)
+        : [];
+      const dateSource = [...unverified, ...corrTargetRecords];
+      const dateRanges = computeVerificationDateRange(dateSource);
       if (!dateRanges || dateRanges.length === 0) {
         logger.warn(`[${location.name}] 検証: 日付範囲を計算できませんでした — スキップ`);
         return { ran: false, error: '日付範囲計算失敗' };
@@ -524,8 +557,19 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
       // D-01: HAMセッションが生きている間にCSVダウンロード
       const csvDownloader = new ScheduleCsvDownloaderService(this.auth);
-      // 当月のみ (D-02) — dateRanges[0] を使用（当月タブなので通常1エントリ）
-      const dr = dateRanges[0];
+      // 当月のみ (D-02) — 修正管理に跨月の旧日付(e.g. 3月)が含まれる場合、
+      // dateRanges[0] が旧月になりCSVが誤った月でDLされる。tab から当月 YYYYMM を抽出して対応 range を選択。
+      // "2026年04月" / "2026年4月" 両対応、月は 0 パディング
+      const tabMonthMatch = (tab || '').match(/(\d{4})年(\d{1,2})月/);
+      const targetYYYYMM = tabMonthMatch
+        ? `${tabMonthMatch[1]}${tabMonthMatch[2].padStart(2, '0')}`
+        : '';
+      const dr = targetYYYYMM
+        ? (dateRanges.find(r => r.targetMonth === targetYYYYMM) || dateRanges[0])
+        : dateRanges[0];
+      if (targetYYYYMM && dr.targetMonth !== targetYYYYMM) {
+        logger.warn(`[${location.name}] 検証: 当月(${targetYYYYMM})の日付範囲が見つからず dateRanges[0]=${dr.targetMonth} にフォールバック`);
+      }
       const csvPath = await csvDownloader.downloadScheduleCsv({
         targetMonth: dr.targetMonth,
         startDay: dr.startDay,
@@ -534,30 +578,74 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       });
 
       // ── ReconciliationService.verify() で突合 ──
-      const reconciliation = new ReconciliationService(this.sheets);
-      const result: VerificationResult = await reconciliation.verify(csvPath, unverified);
+      let result: VerificationResult | undefined;
+      if (unverified.length > 0) {
+        const reconciliation = new ReconciliationService(this.sheets);
+        result = await reconciliation.verify(csvPath, unverified, records);
 
-      // ── STS-01/STS-02: Sheets に検証結果を書き込む ──
-      const now = new Date().toISOString().replace(/\.\d{3}Z$/, '');
-      // 不一致レコードを recordId でルックアップ用マップに変換
-      const mismatchMap = new Map(result.mismatches.map(m => [m.recordId, m]));
+        // ── FIX-A: pending correction の旧キーに一致する extraInHam / missingFromHam を除外 ──
+        if (pendingCorrections.length > 0) {
+          const filtered = this.filterCorrectionArtifacts(
+            result.extraInHam, result.mismatches, pendingCorrections, records,
+          );
+          result = { ...result, extraInHam: filtered.extraInHam, mismatches: filtered.mismatches };
+        }
 
-      for (const r of unverified) {
-        const mm = mismatchMap.get(r.recordId);
-        // 不一致の場合はエラー詳細、一致の場合は空文字列
-        const errorDetail = mm ? this.formatMismatchError(mm) : '';
+        // ── STS-01/STS-02: Sheets に検証結果を一括書き込む ──
+        const now = new Date().toISOString().replace(/\.\d{3}Z$/, '');
+        const mismatchMap = new Map(result.mismatches.map(m => [m.recordId, m]));
 
-        await this.sheets.writeVerificationStatus(
+        const batchEntries = unverified.map(r => {
+          const mm = mismatchMap.get(r.recordId);
+          const errorDetail = mm ? this.formatMismatchError(mm) : '';
+          return { rowIndex: r.rowIndex, verifiedAt: now, verificationError: errorDetail };
+        });
+
+        await this.sheets.batchWriteVerificationStatus(
           location.sheetId,
-          r.rowIndex,
-          now,
-          errorDetail,
+          batchEntries,
           tab,
         );
+
+        // ── RPT-01: コンソール報告 ──
+        this.logVerificationSummary(location.name, result, unverified.length);
+
+        // ── RPT-02: 「検証結果」タブに不一致・余剰レコードを書き込む ──
+        if (result.mismatches.length > 0 || result.extraInHam.length > 0) {
+          try {
+            await this.sheets.writeVerificationReport(
+              location.sheetId,
+              now,
+              {
+                sheetsTotal: result.sheetsTotal,
+                hamTotal: result.hamTotal,
+                matched: result.matched,
+                mismatchCount: result.mismatches.length,
+              },
+              result.mismatches.map(mm => ({
+                recordId: mm.recordId,
+                patientName: mm.patientName,
+                visitDate: mm.visitDate,
+                startTime: mm.startTime,
+                endTime: mm.endTime,
+                errorType: this.formatMismatchError(mm),
+              })),
+              result.extraInHam,
+            );
+          } catch (reportError) {
+            logger.warn(`[${location.name}] 検証結果タブ書き込みエラー: ${(reportError as Error).message}`);
+          }
+        }
       }
 
-      // ── RPT-01: コンソール報告 ──
-      this.logVerificationSummary(location.name, result, unverified.length);
+      // ── COR-01: 修正管理シートの未処理レコードを CSV で照合し処理済みマーク ──
+      if (pendingCorrections.length > 0) {
+        try {
+          await this.verifyCorrectionRecords(location, csvPath, records, pendingCorrections);
+        } catch (corrError) {
+          logger.warn(`[${location.name}] 修正管理検証エラー（転記は正常完了）: ${(corrError as Error).message}`);
+        }
+      }
 
       return { ran: true, result };
     } catch (error) {
@@ -566,6 +654,271 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       logger.warn(`[${location.name}] 検証ステップでエラーが発生しました（転記は正常完了）: ${msg}`);
       return { ran: false, error: msg };
     }
+  }
+
+  /**
+   * COR-01: 修正管理シートの G='上書きOK' かつ J≠'1' のレコードを
+   * 8-1 CSV と照合し、HAM に修正後データが存在することを確認してから
+   * G='処理済み' + J='1' に更新する。
+   *
+   * 検証ロジック:
+   *   1. 月次シートで該当 recordId の転記フラグ='転記済み' を確認
+   *   2. CSV のマッチキー（患者名+日付+開始時刻）で HAM レコードを検索
+   *   3. 変更フィールド（終了時間/スタッフ等）が修正後の値と一致するか照合
+   *   4. すべて一致 → 処理済みマーク
+   */
+  private async verifyCorrectionRecords(
+    location: SheetLocation,
+    csvPath: string,
+    records: TranscriptionRecord[],
+    pending: CorrectionRecord[],
+  ): Promise<void> {
+    logger.info(`[${location.name}] 修正管理検証: 未処理 ${pending.length}件を CSV 照合`);
+
+    // recordId → TranscriptionRecord
+    const recordMap = new Map<string, TranscriptionRecord>();
+    for (const r of records) {
+      recordMap.set(r.recordId, r);
+    }
+
+    // CSV → HAM マップ構築（リハビリ結合 + HAM重複排除済み）
+    const reconciliation = new ReconciliationService(this.sheets);
+    const hamEntries = reconciliation.parseAndMergeScheduleCsv(csvPath);
+    const hamMap = new Map<string, typeof hamEntries>();
+    for (const e of hamEntries) {
+      const key = [
+        normalizeCjkName(e.patientName),
+        this.normalizeDateForCorr(e.visitDate),
+        this.normalizeTimeForCorr(e.startTime),
+      ].join('|');
+      const existing = hamMap.get(key) || [];
+      existing.push(e);
+      hamMap.set(key, existing);
+    }
+
+    let verified = 0;
+    let skipped = 0;
+    const pendingDeletions: Array<{
+      patientName: string; visitDate: string; startTime: string;
+      endTime?: string; staffName?: string; serviceType1?: string; serviceType2?: string;
+    }> = [];
+
+    for (const corr of pending) {
+      const record = recordMap.get(corr.recordId);
+
+      // 月次シートに存在しない or 転記済みでない → スキップ
+      if (!record || record.transcriptionFlag !== '転記済み') {
+        skipped++;
+        continue;
+      }
+
+      // CSV でマッチング
+      const key = [
+        normalizeCjkName(extractPlainName(record.patientName)),
+        this.normalizeDateForCorr(record.visitDate),
+        this.normalizeTimeForCorr(record.startTime),
+      ].join('|');
+      const hamRecords = hamMap.get(key);
+
+      if (!hamRecords || hamRecords.length === 0) {
+        logger.debug(`[${location.name}] 修正管理検証: recordId=${corr.recordId} (${corr.patientName}) HAM CSV にキー不一致 → スキップ`);
+        skipped++;
+        continue;
+      }
+
+      // スタッフ名 or 終了時刻でベスト HAM レコードを選定
+      const sheetsStaff = normalizeCjkName(resolveStaffAlias(extractPlainName(record.staffName)));
+      const sheetsEnd = this.normalizeTimeForCorr(record.endTime);
+
+      const bestHam =
+        hamRecords.find(h => normalizeCjkName(resolveStaffAlias(extractPlainName(h.staffName))) === sheetsStaff)
+        || hamRecords.find(h => this.normalizeTimeForCorr(h.endTime) === sheetsEnd)
+        || hamRecords[0];
+
+      // 終了時刻照合（HAM は -1分のため 1分差まで許容）
+      const hamEnd = this.normalizeTimeForCorr(bestHam.endTime);
+      const endOk = !sheetsEnd || !hamEnd || Math.abs(this.timeToMin(sheetsEnd) - this.timeToMin(hamEnd)) <= 1;
+
+      // スタッフ名照合
+      const hamStaff = normalizeCjkName(resolveStaffAlias(extractPlainName(bestHam.staffName)));
+      const staffOk = sheetsStaff === hamStaff;
+
+      if (!endOk || !staffOk) {
+        logger.debug(
+          `[${location.name}] 修正管理検証: recordId=${corr.recordId} (${corr.patientName}) ` +
+          `HAM不一致(end=${sheetsEnd}/${hamEnd}, staff=${sheetsStaff}/${hamStaff}) → スキップ`
+        );
+        skipped++;
+        continue;
+      }
+
+      // 検証OK → 処理済みマーク
+      try {
+        await this.sheets.markCorrectionProcessed(location.sheetId, corr.rowIndex);
+        verified++;
+        logger.info(
+          `[${location.name}] 修正管理検証OK: recordId=${corr.recordId} (${corr.patientName}) → 処理済み`
+        );
+      } catch (markErr) {
+        logger.warn(`[${location.name}] 修正管理処理済みマーク失敗 (row=${corr.rowIndex}): ${(markErr as Error).message}`);
+      }
+
+      // ── FIX-B: キー変更で旧 HAM エントリが残存している場合、削除Sheetに追加 ──
+      const changes = parseChangeDetail(corr.changeDetail);
+      const keyChanges = changes.filter(c => isKeyFieldChange(c.field));
+      if (keyChanges.length > 0) {
+        const oldValues = buildOldKeyValues(record, keyChanges);
+
+        const oldKey = [
+          normalizeCjkName(extractPlainName(oldValues.patientName)),
+          this.normalizeDateForCorr(oldValues.visitDate),
+          this.normalizeTimeForCorr(oldValues.startTime),
+        ].join('|');
+        const oldHamEntries = hamMap.get(oldKey);
+
+        if (oldHamEntries && oldHamEntries.length > 0) {
+          for (const oldEntry of oldHamEntries) {
+            pendingDeletions.push({
+              patientName: oldEntry.patientName,
+              visitDate: oldEntry.visitDate,
+              startTime: oldEntry.startTime,
+              endTime: oldEntry.endTime,
+              staffName: oldEntry.staffName,
+              serviceType1: oldEntry.serviceName,
+              serviceType2: oldEntry.serviceContent,
+            });
+          }
+          logger.info(
+            `[${location.name}] FIX-B: 旧HAMエントリ ${oldHamEntries.length}件を削除Sheet追加予定 ` +
+            `(${corr.patientName} ${oldValues.visitDate} ${oldValues.startTime})`
+          );
+        }
+      }
+    }
+
+    if (verified > 0 || skipped > 0) {
+      logger.info(`[${location.name}] 修正管理検証完了: 処理済み=${verified}, スキップ=${skipped}`);
+    }
+
+    // ── FIX-B: 旧HAMエントリを削除Sheetに一括追加 ──
+    if (pendingDeletions.length > 0) {
+      try {
+        await this.sheets.appendDeletionRecords(location.sheetId, pendingDeletions);
+        logger.info(`[${location.name}] FIX-B: 旧HAMエントリ ${pendingDeletions.length}件を削除Sheetに追加完了`);
+      } catch (delErr) {
+        logger.warn(`[${location.name}] FIX-B: 削除Sheet追加エラー: ${(delErr as Error).message}`);
+      }
+    }
+  }
+
+  /**
+   * FIX-A: pending correction のキー変更によって生じる虚偽の extraInHam / missingFromHam を除外する。
+   *
+   * 例: 修正管理「【開始時間】16:13→16:00」が未処理の場合
+   *   - Sheet は 16:00（新値）→ HAM CSV は 16:13（旧値）
+   *   - extraInHam に旧キー(16:13)、mismatches に新キー(16:00, missingFromHam) が出る
+   *   - 両方とも修正による一時的な不一致 → 除外
+   */
+  private filterCorrectionArtifacts(
+    extraInHam: ExtraInHamRecord[],
+    mismatches: VerificationMismatch[],
+    corrections: readonly CorrectionRecord[],
+    records: readonly TranscriptionRecord[],
+  ): { extraInHam: ExtraInHamRecord[]; mismatches: VerificationMismatch[] } {
+    // recordId → TranscriptionRecord
+    const recordMap = new Map<string, TranscriptionRecord>();
+    for (const r of records) recordMap.set(r.recordId, r);
+
+    // 旧キー集合（HAM に残っている旧データ → extraInHam として誤検出される）
+    const oldKeys = new Set<string>();
+    // 新キー集合（Sheet は新データだが HAM にまだない → missingFromHam として誤検出される）
+    const newKeys = new Set<string>();
+
+    for (const corr of corrections) {
+      const changes = parseChangeDetail(corr.changeDetail);
+      const keyChanges = changes.filter(c => isKeyFieldChange(c.field));
+      if (keyChanges.length === 0) continue;
+
+      const record = recordMap.get(corr.recordId);
+      if (!record) continue;
+
+      const oldValues = buildOldKeyValues(record, keyChanges);
+
+      const makeKey = (name: string, date: string, time: string) => {
+        const n = normalizeCjkName(name);
+        const d = this.normalizeDateForCorr(date);
+        const t = this.normalizeTimeForCorr(time);
+        return `${n}|${d}|${t}`;
+      };
+
+      oldKeys.add(makeKey(oldValues.patientName, oldValues.visitDate, oldValues.startTime));
+      newKeys.add(makeKey(record.patientName, record.visitDate, record.startTime));
+    }
+
+    if (oldKeys.size === 0) {
+      return { extraInHam, mismatches };
+    }
+
+    const filteredExtra = extraInHam.filter(e => {
+      const key = `${normalizeCjkName(e.patientName)}|${this.normalizeDateForCorr(e.visitDate)}|${this.normalizeTimeForCorr(e.startTime)}`;
+      if (oldKeys.has(key)) {
+        logger.info(`FIX-A: extraInHam 除外（修正旧キー一致）: ${e.patientName} ${e.visitDate} ${e.startTime}`);
+        return false;
+      }
+      return true;
+    });
+
+    const filteredMismatches = mismatches.filter(m => {
+      if (!m.missingFromHam) return true;
+      const key = `${normalizeCjkName(m.patientName)}|${this.normalizeDateForCorr(m.visitDate)}|${this.normalizeTimeForCorr(m.startTime)}`;
+      if (newKeys.has(key)) {
+        logger.info(`FIX-A: missingFromHam 除外（修正新キー一致）: ${m.patientName} ${m.visitDate} ${m.startTime}`);
+        return false;
+      }
+      return true;
+    });
+
+    const removedExtra = extraInHam.length - filteredExtra.length;
+    const removedMismatch = mismatches.length - filteredMismatches.length;
+    if (removedExtra > 0 || removedMismatch > 0) {
+      logger.info(`FIX-A: 修正アーティファクト除外 — extraInHam: ${removedExtra}件, missingFromHam: ${removedMismatch}件`);
+    }
+
+    return { extraInHam: filteredExtra, mismatches: filteredMismatches };
+  }
+
+  /**
+   * 修正管理レコードから computeVerificationDateRange に渡せる形式に変換する。
+   * 月次シートの転記済みレコードの日付を使用して日付範囲を計算する。
+   */
+  private correctionRecordsToFakeTranscription(
+    corrections: CorrectionRecord[],
+    records: TranscriptionRecord[],
+  ): TranscriptionRecord[] {
+    // 修正管理の recordId に対応する月次シートのレコードを返す
+    const corrRecordIds = new Set(corrections.map(c => c.recordId));
+    return records.filter(r => corrRecordIds.has(r.recordId) && r.transcriptionFlag === '転記済み');
+  }
+
+  /** 日付正規化（修正管理検証用） */
+  private normalizeDateForCorr(dateStr: string): string {
+    if (!dateStr) return '';
+    const cleaned = dateStr.trim();
+    if (/^\d{8}$/.test(cleaned)) return `${cleaned.substring(0, 4)}/${cleaned.substring(4, 6)}/${cleaned.substring(6, 8)}`;
+    return cleaned.replace(/-/g, '/');
+  }
+
+  /** 時刻正規化（修正管理検証用） */
+  private normalizeTimeForCorr(timeStr: string): string {
+    if (!timeStr) return '';
+    const m = timeStr.trim().match(/(\d{1,2}):(\d{2})/);
+    return m ? `${m[1].padStart(2, '0')}:${m[2]}` : '';
+  }
+
+  /** 時刻→分変換 */
+  private timeToMin(t: string): number {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
   }
 
   /**
@@ -814,7 +1167,8 @@ export class TranscriptionWorkflow extends BaseWorkflow {
                 || m.includes('不明なサービス種別')
                 || m.includes('患者が見つかりません')
                 || m.includes('マスタ不備')
-                || m.includes('スタッフ配置不可');
+                || m.includes('スタッフ配置不可')
+                || m.includes('開始時間以下のためスキップ');
             },
           },
         );
@@ -1277,9 +1631,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     if (record.transcriptionFlag !== '修正あり') {
       const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName, record.endTime);
       if (dupStatus === 'complete') {
+        // assignId を取得してから早期リターン（AA列 書き込み漏れ防止）
+        const existingIds = await this.findExistingAssignIds(nav, visitDateHam, record.startTime, record.staffName);
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
-        logger.info(`重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
+        if (existingIds.length > 0) {
+          await this.sheets.writeHamAssignId(sheetId, record.rowIndex, existingIds.join(','), tab);
+        }
+        logger.info(`重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName} (assignId=${existingIds.join(',') || 'なし'})`);
         await this.clickBackButtonOnK2_2(nav);
         return;
       }
@@ -1423,6 +1782,16 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // 実訪問時間が区間境界と一致しない場合は不正確（例: 12:00-12:35 → HAM自動=12:59）。
     // 正しい終了時間 = 表格の終了時間 - 1分（HAM仕様: 12:35 → 12:34）。
     const correctedEnd = calcCorrectedEndTime(record.endTime);
+
+    // 補正後の終了時間が開始時間以下の場合はスキップ（データ不正）
+    const correctedEndMinutes = parseInt(correctedEnd.hour) * 60 + parseInt(correctedEnd.minute);
+    const startMinutes = parseInt(startParts.hour) * 60 + parseInt(startParts.minute);
+    if (correctedEndMinutes <= startMinutes) {
+      const msg = `終了時間(${correctedEnd.hour}:${correctedEnd.minute})が開始時間(${record.startTime})以下のためスキップ`;
+      logger.warn(`[${record.recordId}] ${msg}`);
+      throw new Error(msg);
+    }
+
     const k2_3FrameForEnd = await nav.getMainFrame('k2_3');
     await k2_3FrameForEnd.locator('select[name="endtime0"]').selectOption(correctedEnd.hour);
     await this.sleep(300);
@@ -1453,6 +1822,38 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
     await nav.switchInsuranceType(codeResult.showflag, k2_3aFrame);
     await this.sleep(2000); // 保険種別切替後のリロード待ち
+
+    // === Step 7 検証: showflag が正しく切り替わったか確認（介護/医療 誤登録防止） ===
+    // switchInsuranceType 後にページリロードが不完全な場合、旧 showflag のまま
+    // サービスコードが選択され、介護→医療 or 医療→介護 の誤登録が発生する。
+    for (let verifyRetry = 0; verifyRetry < 3; verifyRetry++) {
+      const verifyFrame = await nav.getMainFrame('k2_3a');
+      const actualShowflag = await verifyFrame.evaluate(() => {
+        const form = document.forms[0];
+        return form?.showflag?.value || '';
+      }).catch(() => '');
+
+      if (actualShowflag === codeResult.showflag) {
+        if (verifyRetry > 0) {
+          logger.info(`showflag 検証OK（リトライ${verifyRetry}回目で成功）: ${actualShowflag}`);
+        }
+        break;
+      }
+
+      if (verifyRetry < 2) {
+        logger.warn(
+          `showflag 切替未反映: 期待=${codeResult.showflag}, 実際=${actualShowflag} → リトライ (${verifyRetry + 1}/3)`,
+        );
+        await nav.switchInsuranceType(codeResult.showflag);
+        await this.sleep(3000);
+      } else {
+        // 3回リトライしても失敗 → エラー
+        throw new Error(
+          `showflag 切替失敗: 期待=${codeResult.showflag}, 実際=${actualShowflag}。` +
+          `介護/医療の誤登録を防止するため中断します。recordId=${record.recordId}, ${record.patientName}`,
+        );
+      }
+    }
 
     // === Step 7.5: k2_3a でスタッフ資格選択（医療保険のみ）— サービスコード選択の前に実行 ===
     // 資格フィルタを先に適用することで、サービスコード一覧が准看護師用に絞り込まれる
@@ -1782,6 +2183,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       // skipStaffAssignment: スケジュール＋スタッフ済み → 実績フラグ設定のみ
       logger.info(`スタッフ配置スキップ（実績フラグのみ更新）: ${record.recordId}`);
       k2_2MainFrame = await nav.getMainFrame('k2_2');
+      // assignId を取得（AA列 書き込み漏れ防止）
+      const existingIds = await this.findExistingAssignIds(nav, visitDateHam, record.startTime, record.staffName);
+      if (existingIds.length > 0) {
+        assignId = existingIds[0];
+        logger.debug(`skipStaffAssignment: assignId=${assignId} を取得`);
+      }
     }
 
     // === Step 11: k2_2 で「全1」ボタン — 実績フラグ一括設定 ===
@@ -1973,9 +2380,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       // k2_2 の最初の行は startTime〜startTime+20min で、record.endTime とは異なる。
       const dupStatus = await this.checkDuplicateOnK2_2(nav, visitDateHam, record.startTime, record.staffName);
       if (dupStatus === 'complete') {
+        // assignId を取得してから早期リターン（AA列 書き込み漏れ防止）
+        const existingIds = await this.findExistingAssignIds(nav, visitDateHam, record.startTime, record.staffName);
         await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '転記済み', undefined, tab);
         await this.sheets.writeDataFetchedAt(sheetId, record.rowIndex, new Date().toISOString(), tab);
-        logger.info(`I5 重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName}`);
+        if (existingIds.length > 0) {
+          await this.sheets.writeHamAssignId(sheetId, record.rowIndex, existingIds.join(','), tab);
+        }
+        logger.info(`I5 重複スキップ → 転記済みに更新: ${record.recordId} - ${record.patientName} (assignId=${existingIds.join(',') || 'なし'})`);
         await this.clickBackButtonOnK2_2(nav);
         return;
       }
@@ -2058,6 +2470,16 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     const endParts = parseTime(record.endTime);
     const startPeriod = getTimePeriod(record.startTime);
     const durationMinutes = calcDurationMinutes(record.startTime, record.endTime);
+
+    // 終了時間が開始時間以下の場合はスキップ（データ不正 — 跨日誤判定を防止）
+    const startMin = parseInt(startParts.hour) * 60 + parseInt(startParts.minute);
+    const endMin = parseInt(endParts.hour) * 60 + parseInt(endParts.minute);
+    if (endMin <= startMin) {
+      const msg = `I5: 終了時間(${record.endTime})が開始時間(${record.startTime})以下のためスキップ`;
+      logger.warn(`[${record.recordId}] ${msg}`);
+      throw new Error(msg);
+    }
+
     // サービス回数: 20分=1回、40分=2回、60分=3回（仕様書定義）
     const serviceCount = Math.min(3, Math.max(1, Math.ceil(durationMinutes / 20)));
     logger.debug(`I5フロー: duration=${durationMinutes}分 → サービス回数=${serviceCount}回`);
@@ -3093,6 +3515,104 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     if (result) {
       logger.debug(`assignId検出: ${result} (day=${dayDisplay}${startTime ? `, time=${startTime}` : ''})`);
+    }
+    return result;
+  }
+
+  /**
+   * k2_2 で指定日+開始時刻のスタッフ配置済み行から assignId を取得する。
+   * dupStatus が 'complete' / 'needs_jisseki' で早期リターンする前に呼び出し、
+   * AA 列への assignId 書き込み漏れを防止する。
+   *
+   * findNewAssignId が「未配置」行を探すのに対し、こちらは「配置済み」行を探す。
+   * I5 等で同一日付+時刻に複数行がある場合は全て返す。
+   */
+  private async findExistingAssignIds(
+    nav: HamNavigator,
+    visitDateHam: string,
+    startTime: string,
+    staffName?: string,
+  ): Promise<string[]> {
+    const frame = await nav.getMainFrame('k2_2');
+    const dayNum = parseInt(visitDateHam.substring(6, 8));
+
+    const staffSurname = staffName
+      ? normalizeCjkName(resolveStaffAlias(extractPlainName(staffName))).substring(0, 3)
+      : '';
+
+    const result = await frame.evaluate(({ targetDay, st, surname, variantMap }) => {
+      function normCjk(s: string): string {
+        let r = s.normalize('NFKC');
+        r = r.replace(/[\uFE00-\uFE0F]|\uDB40[\uDD00-\uDDEF]/g, '');
+        r = r.replace(/[\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/g, '');
+        for (const [old, rep] of variantMap) { r = r.replaceAll(old, rep); }
+        r = r.replace(/[\u3041-\u3096]/g, ch => String.fromCharCode(ch.charCodeAt(0) + 0x60));
+        r = r.replace(/\u30F2/g, '\u30AA');
+        r = r.replace(/\u30F1/g, '\u30A8');
+        return r.replace(/[\s\u3000\u00a0]+/g, '');
+      }
+
+      const dayPattern = /(?:^|[^0-9])(\d{1,2})日/;
+      const allRows = Array.from(document.querySelectorAll('tr'));
+      const rowDayMap = new Map<Element, number>();
+      let currentDay = -1;
+      for (const row of allRows) {
+        const m = (row.textContent || '').match(dayPattern);
+        if (m) currentDay = parseInt(m[1]);
+        rowDayMap.set(row, currentDay);
+      }
+
+      const stRegex = new RegExp(st.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*～');
+      const ids: string[] = [];
+      const seen = new Set<string>();
+
+      // assignId 抽出: 行内の配置/削除ボタンの onclick から取得
+      function extractIdFromRow(row: Element): string | null {
+        // 配置ボタン: submitTargetFormEx(this.form, 'act_modify', assignid, 'XXXXX')
+        const haichiBtn = row.querySelector('input[name="act_modify"][value="配置"]');
+        if (haichiBtn) {
+          const oc = haichiBtn.getAttribute('onclick') || '';
+          const m = oc.match(/assignid\s*,\s*'(\d+)'/) || oc.match(/assignid\.value\s*=\s*'(\d+)'/);
+          if (m) return m[1];
+        }
+        // 削除ボタン: confirmDelete('XXXXX', 'YYY')
+        const delBtn = row.querySelector('input[name="act_delete"][value="削除"]');
+        if (delBtn) {
+          const oc = delBtn.getAttribute('onclick') || '';
+          const m = oc.match(/confirmDelete\(\s*'(\d+)'/);
+          if (m) return m[1];
+        }
+        return null;
+      }
+
+      const allTrs = document.querySelectorAll('tr');
+      for (const tr of Array.from(allTrs)) {
+        const rowDay = rowDayMap.get(tr) ?? -1;
+        if (rowDay !== targetDay) continue;
+
+        const rowText = tr.textContent || '';
+        if (!stRegex.test(rowText)) continue;
+
+        const staffCell = tr.querySelector('td[bgcolor="#DDEEFF"]');
+        const rawStaffText = (staffCell?.textContent || '').replace(/[\s\u3000]+/g, '');
+        if (!rawStaffText) continue; // 未配置行はスキップ
+
+        if (surname) {
+          const staffText = normCjk(rawStaffText);
+          if (!staffText.includes(surname)) continue;
+        }
+
+        const id = extractIdFromRow(tr);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+      return ids;
+    }, { targetDay: dayNum, st: startTime, surname: staffSurname, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
+
+    if (result.length > 0) {
+      logger.debug(`既存assignId検出: ${result.join(',')} (day=${dayNum}日, time=${startTime})`);
     }
     return result;
   }
@@ -4419,6 +4939,9 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
     if (msg.includes('不明なサービス種別')) {
       return { status: 'エラー：マスタ不備', category: 'master', detail: msg.substring(0, 100) };
+    }
+    if (msg.includes('開始時間以下のためスキップ')) {
+      return { status: 'エラー：マスタ不備', category: 'master', detail: `終了時間不正: ${msg.substring(0, 100)}` };
     }
     if (msg.includes('サービスコード未検出')) {
       return { status: 'エラー：システム', category: 'system', detail: 'サービスコードが見つかりません。HAM設定を確認してください' };

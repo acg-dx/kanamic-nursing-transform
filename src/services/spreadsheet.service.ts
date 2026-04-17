@@ -154,8 +154,8 @@ export class SpreadsheetService {
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
       range: `${tab}!${colToLetter(COL_RECORD_LOCKED)}${rowIndex}`, // Z(25) 実績ロック
-      valueInputOption: 'RAW',
-      requestBody: { values: [['FALSE']] },
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[false]] },
     });
     logger.debug(`実績ロック解除: row=${rowIndex}`);
   }
@@ -163,6 +163,8 @@ export class SpreadsheetService {
   /** HAM assignId を月次Sheet AA列に書き込む（転記時に保存、削除時に使用） */
   async writeHamAssignId(sheetId: string, rowIndex: number, assignId: string, tab?: string): Promise<void> {
     tab = tab || getCurrentMonthTab();
+    // AA列(27列目)が存在しない場合は自動拡張
+    await this.ensureColumnCount(sheetId, tab, COL_HAM_ASSIGN_ID + 1);
     await this.sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
       range: `${tab}!${colToLetter(COL_HAM_ASSIGN_ID)}${rowIndex}`, // AA(26)
@@ -170,6 +172,89 @@ export class SpreadsheetService {
       requestBody: { values: [[assignId]] },
     });
     logger.debug(`HAM assignId 書き込み: row=${rowIndex}, assignId=${assignId}`);
+  }
+
+  /**
+   * 指定タブの列数が requiredCols 未満なら拡張する。
+   * 拡張時、Z列(実績ロック FALSE)が新列に溢出して残留するため、新列(AA)の
+   * ブール値残留をクリアする（assignId データと干渉するのを防止）。
+   */
+  private async ensureColumnCount(sheetId: string, tab: string, requiredCols: number): Promise<void> {
+    const res = await this.sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: 'sheets(properties(sheetId,title,gridProperties(columnCount,rowCount)))',
+    });
+    for (const s of (res.data.sheets || [])) {
+      if (s.properties?.title !== tab) continue;
+      const cols = s.properties.gridProperties?.columnCount || 0;
+      const rowCount = s.properties.gridProperties?.rowCount || 0;
+      if (cols >= requiredCols) return;
+
+      logger.info(`Sheet列数拡張: [${tab}] ${cols} → ${requiredCols}`);
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+          requests: [{
+            updateSheetProperties: {
+              properties: {
+                sheetId: s.properties.sheetId!,
+                gridProperties: { columnCount: requiredCols },
+              },
+              fields: 'gridProperties.columnCount',
+            },
+          }],
+        },
+      });
+
+      // 新列の Z→AA 等 FALSE/TRUE 溢出クリア (requiredCols-1 列目、0-indexed)
+      const newColLetter = colToLetter(requiredCols - 1);
+      const newColRange = `${tab}!${newColLetter}2:${newColLetter}${rowCount}`;
+      try {
+        const aaRes = await this.sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: newColRange });
+        const aaRows = aaRes.data.values || [];
+        const dirtyCount = aaRows.filter(r => r[0] === 'FALSE' || r[0] === 'TRUE').length;
+        if (dirtyCount > 0) {
+          logger.info(`Sheet拡張後 ${newColLetter}列 ブール値残留 ${dirtyCount}件 をクリア`);
+          const cleaned = aaRows.map(r => [(r[0] === 'FALSE' || r[0] === 'TRUE') ? '' : (r[0] || '')]);
+          await this.sheets.spreadsheets.values.update({
+            spreadsheetId: sheetId,
+            range: newColRange,
+            valueInputOption: 'RAW',
+            requestBody: { values: cleaned },
+          });
+        }
+      } catch (e) {
+        logger.warn(`Sheet拡張後クリア失敗 (無害): ${(e as Error).message}`);
+      }
+      return;
+    }
+  }
+
+  /**
+   * 月次Sheet の転記ステータスを読み取って検証する。
+   * 修正管理「処理済み」マーク前に、月次Sheet への書き込みが反映されたか確認する。
+   * @returns T列の転記フラグ値（未取得時は undefined）
+   */
+  async verifyMonthlySheetStatus(
+    sheetId: string,
+    rowIndex: number,
+    tab?: string,
+  ): Promise<{ transcriptionFlag: string | undefined; hamAssignId: string | undefined }> {
+    tab = tab || getCurrentMonthTab();
+    const tCol = colToLetter(COL_TRANSCRIPTION_FLAG);
+    const aaCol = colToLetter(COL_HAM_ASSIGN_ID);
+    const range = `${tab}!${tCol}${rowIndex}:${aaCol}${rowIndex}`;
+    const response = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range,
+    });
+    const row = response.data.values?.[0];
+    if (!row) return { transcriptionFlag: undefined, hamAssignId: undefined };
+    // T=0, U=1, V=2, W=3, X=4, Y=5, Z=6, AA=7 (relative to T column)
+    return {
+      transcriptionFlag: (row[0] as string) || undefined,
+      hamAssignId: (row[COL_HAM_ASSIGN_ID - COL_TRANSCRIPTION_FLAG] as string) || undefined,
+    };
   }
 
   /**
@@ -184,25 +269,41 @@ export class SpreadsheetService {
     verificationError: string,
     tab?: string,
   ): Promise<void> {
+    await this.batchWriteVerificationStatus(sheetId, [{ rowIndex, verifiedAt, verificationError }], tab);
+  }
+
+  /**
+   * 検証ステータスを一括書き込み（batchUpdate で API コール数を削減）
+   */
+  async batchWriteVerificationStatus(
+    sheetId: string,
+    entries: Array<{ rowIndex: number; verifiedAt: string; verificationError: string }>,
+    tab?: string,
+  ): Promise<void> {
+    if (entries.length === 0) return;
     tab = tab || getCurrentMonthTab();
-    const updates: Array<{ range: string; values: string[][] }> = [
-      { range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${rowIndex}`, values: [[verifiedAt]] },
-      { range: `${tab}!${colToLetter(COL_VERIFICATION_ERROR)}${rowIndex}`, values: [[verificationError]] },
-    ];
-    for (const update of updates) {
-      await this.sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: update.range,
-        valueInputOption: 'RAW',
-        requestBody: { values: update.values },
-      });
+    const data: Array<{ range: string; values: string[][] }> = [];
+    for (const e of entries) {
+      data.push({ range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${e.rowIndex}`, values: [[e.verifiedAt]] });
+      data.push({ range: `${tab}!${colToLetter(COL_VERIFICATION_ERROR)}${e.rowIndex}`, values: [[e.verificationError]] });
     }
-    logger.debug(`検証ステータス書き込み: row=${rowIndex}, verifiedAt=${verifiedAt}, error=${verificationError || '(none)'}`);
+    await this.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data,
+      },
+    });
+    logger.info(`検証ステータス一括書き込み: ${entries.length}件`);
+    for (const e of entries) {
+      logger.debug(`検証ステータス書き込み: row=${e.rowIndex}, verifiedAt=${e.verifiedAt}, error=${e.verificationError || '(none)'}`);
+    }
   }
 
   /**
    * 自動修正のためのステータスリセット (D-07)
-   * T列を空（未転記状態）に、AB列（検証タイムスタンプ）とAC列（検証エラー）をクリアする。
+   * T列を空（未転記状態）に、AA列（assignId）、AB列（検証タイムスタンプ）、AC列（検証エラー）をクリアする。
+   * assignId は再転記時に新しい値が書き込まれるため、旧値を残すと無効な ID で削除操作が失敗する。
    */
   async resetForRetranscription(
     sheetId: string,
@@ -210,20 +311,89 @@ export class SpreadsheetService {
     tab?: string,
   ): Promise<void> {
     tab = tab || getCurrentMonthTab();
-    const updates: Array<{ range: string; values: string[][] }> = [
+    const data = [
       { range: `${tab}!${colToLetter(COL_TRANSCRIPTION_FLAG)}${rowIndex}`, values: [['']] },
+      { range: `${tab}!${colToLetter(COL_HAM_ASSIGN_ID)}${rowIndex}`, values: [['']] },
       { range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${rowIndex}`, values: [['']] },
       { range: `${tab}!${colToLetter(COL_VERIFICATION_ERROR)}${rowIndex}`, values: [['']] },
     ];
-    for (const update of updates) {
+    await this.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { valueInputOption: 'RAW', data },
+    });
+    logger.debug(`自動修正リセット: row=${rowIndex}, T列=空, AA列=空, AB列=空, AC列=空`);
+  }
+
+  /**
+   * 「検証結果」タブに検証サマリーと extraInHam レコードを書き込む。
+   * タブが存在しなければ自動作成し、毎回の検証で事業所セクションを追記する。
+   */
+  async writeVerificationReport(
+    sheetId: string,
+    verifiedAt: string,
+    summary: { sheetsTotal: number; hamTotal: number; matched: number; mismatchCount: number },
+    mismatches: Array<{ recordId: string; patientName: string; visitDate: string; startTime: string; endTime: string; errorType: string }>,
+    extraInHam: Array<{ patientName: string; visitDate: string; startTime: string; endTime: string; staffName: string; serviceName: string; serviceContent: string }>,
+  ): Promise<void> {
+    const tabName = '検証結果';
+
+    // タブ存在チェック → なければ作成
+    const meta = await this.sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: 'sheets(properties(title))',
+    });
+    const exists = (meta.data.sheets || []).some(s => s.properties?.title === tabName);
+    if (!exists) {
+      await this.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: tabName } } }],
+        },
+      });
+      // ヘッダー行を書き込み
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: sheetId,
-        range: update.range,
+        range: `${tabName}!A1`,
         valueInputOption: 'RAW',
-        requestBody: { values: update.values },
+        requestBody: {
+          values: [['種別', '検証日時', '利用者名', '訪問日', '開始', '終了', 'スタッフ', 'サービス種類', 'サービス内容', 'エラー種別']],
+        },
       });
+      logger.info(`「${tabName}」タブを新規作成しました`);
     }
-    logger.debug(`自動修正リセット: row=${rowIndex}, T列=空, AB列=空, AC列=空`);
+
+    // 既存データの末尾行を取得
+    const existing = await this.sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `${tabName}!A:A`,
+    });
+    const nextRow = (existing.data.values?.length || 1) + 1;
+
+    // 書き込みデータを構築
+    const rows: string[][] = [];
+
+    // サマリー行
+    rows.push(['サマリー', verifiedAt, `Sheets=${summary.sheetsTotal}`, `HAM=${summary.hamTotal}`, `一致=${summary.matched}`, `不一致=${summary.mismatchCount}`, `余剰=${extraInHam.length}`, '', '', '']);
+
+    // 不一致レコード
+    for (const mm of mismatches) {
+      rows.push(['不一致', verifiedAt, mm.patientName, mm.visitDate, mm.startTime, mm.endTime, '', '', '', mm.errorType]);
+    }
+
+    // extraInHam レコード
+    for (const e of extraInHam) {
+      rows.push(['HAM余剰', verifiedAt, e.patientName, e.visitDate, e.startTime, e.endTime, e.staffName, e.serviceName, e.serviceContent, '']);
+    }
+
+    if (rows.length > 0) {
+      await this.sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `${tabName}!A${nextRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: rows },
+      });
+      logger.info(`「${tabName}」タブに ${rows.length} 行追記`);
+    }
   }
 
   /**
@@ -471,17 +641,17 @@ export class SpreadsheetService {
   }
 
   async getCorrectionRecords(sheetId: string): Promise<CorrectionRecord[]> {
-    const range = '看護記録修正管理!A2:I';
+    const range = '看護記録修正管理!A2:J';
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: sheetId,
         range,
       });
       const rows = response.data.values || [];
+      // IMPORTANT: map BEFORE filter to preserve correct rowIndex (sheet row numbers)
       return rows
-        .filter(row => row[COL_A])
         .map((row, index) => ({
-          rowIndex: index + 2,
+          rowIndex: index + 2, // 1-indexed, header is row 1
           correctionId: row[COL_A] || '',
           recordId: row[COL_B] || '',
           patientName: row[COL_C] || '',
@@ -490,8 +660,10 @@ export class SpreadsheetService {
           changeDetail: row[COL_F] || '',
           status: row[COL_G] || '',
           errorLog: row[COL_H] || '',
-          processedFlag: row[8] || '',  // I列 (index 8)
-        }));
+          overwriteDone: row[COL_I] || '',  // I列: 看護記録転記の上書き済みフラグ
+          processedFlag: row[COL_J] || '',   // J列: 転記RPA処理済みフラグ
+        }))
+        .filter(record => record.correctionId); // skip empty rows (after rowIndex assignment)
     } catch (error) {
       logger.error(`修正レコード取得エラー: ${(error as Error).message}`);
       return []; // 修正管理Sheetが存在しない場合は空配列
@@ -500,7 +672,8 @@ export class SpreadsheetService {
 
   /**
    * 修正管理レコードを「処理済み」にマーク
-   * G列を「処理済み」に、I列を "1" に更新する。
+   * G列を「処理済み」に、J列を "1" に更新する。
+   * ※ I列は看護記録転記プロジェクトの「上書き済み」フラグなので書き込まない
    */
   async markCorrectionProcessed(sheetId: string, rowIndex: number): Promise<void> {
     await this.sheets.spreadsheets.values.batchUpdate({
@@ -509,7 +682,7 @@ export class SpreadsheetService {
         valueInputOption: 'RAW',
         data: [
           { range: `看護記録修正管理!G${rowIndex}`, values: [['処理済み']] },
-          { range: `看護記録修正管理!I${rowIndex}`, values: [['1']] },
+          { range: `看護記録修正管理!J${rowIndex}`, values: [['1']] },
         ],
       },
     });
@@ -589,10 +762,10 @@ export class SpreadsheetService {
         range,
       });
       const rows = response.data.values || [];
+      // IMPORTANT: map BEFORE filter to preserve correct rowIndex (sheet row numbers)
       return rows
-        .filter(row => row[COL_A])
         .map((row, index) => ({
-          rowIndex: index + 2,
+          rowIndex: index + 2, // 1-indexed, header is row 1
           facilityName: row[0] || '',
           aozoraId: row[1] || '',
           userName: row[2] || '',
@@ -602,7 +775,8 @@ export class SpreadsheetService {
           isNew: parseBoolean(row[6]),
           status: row[7] || '',
           notes: row[8] || undefined,
-        }));
+        }))
+        .filter(record => record.facilityName); // skip empty rows (after rowIndex assignment)
     } catch (error) {
       logger.error(`建物管理レコード取得エラー (tab=${tab}): ${(error as Error).message}`);
       throw error;
@@ -663,6 +837,33 @@ export class SpreadsheetService {
         requestBody: { values: [[errorDetail]] },
       });
     }
+  }
+
+  /**
+   * 同一建物管理のステータスをバッチ更新（API 呼び出し削減）
+   */
+  async batchUpdateBuildingManagementStatus(
+    sheetId: string,
+    tab: string,
+    updates: Array<{ rowIndex: number; status: string; errorDetail?: string }>,
+  ): Promise<void> {
+    if (updates.length === 0) return;
+
+    const data: Array<{ range: string; values: string[][] }> = [];
+    for (const u of updates) {
+      data.push({ range: `${tab}!H${u.rowIndex}`, values: [[u.status]] });
+      if (u.errorDetail !== undefined) {
+        data.push({ range: `${tab}!I${u.rowIndex}`, values: [[u.errorDetail]] });
+      }
+    }
+
+    await this.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data,
+      },
+    });
   }
 
   /**

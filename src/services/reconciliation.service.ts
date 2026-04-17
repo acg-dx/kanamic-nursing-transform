@@ -24,7 +24,7 @@
  */
 import fs from 'fs';
 import { logger } from '../core/logger';
-import { normalizeCjkName } from '../core/cjk-normalize';
+import { normalizeCjkName, extractPlainName, resolveStaffAlias } from '../core/cjk-normalize';
 import type { SpreadsheetService } from './spreadsheet.service';
 import type { TranscriptionRecord } from '../types/spreadsheet.types';
 
@@ -177,8 +177,16 @@ function normalizeTimeForVerify(time: string): string {
   return `${m[1].padStart(2, '0')}:${m[2]}`;
 }
 
+/** HH:MM → 分数に変換 */
+function timeToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
 /**
- * 終了時刻の不一致チェック（D-03: 完全一致）
+ * 終了時刻の不一致チェック
+ * HAM は終了時刻を -1 分で記録する（例: Sheets 08:30 → HAM 08:29）ため、
+ * 1 分以内の差異は一致とみなす。
  * @returns 不一致がある場合は { sheetsEndTime, hamEndTime }、一致なら undefined
  */
 export function checkTimeMismatch(
@@ -189,6 +197,8 @@ export function checkTimeMismatch(
   const normHam = normalizeTimeForVerify(hamEndTime);
   if (!normSheets || !normHam) return undefined;  // 片方がない場合はスキップ
   if (normSheets === normHam) return undefined;    // 完全一致
+  const diff = Math.abs(timeToMinutes(normSheets) - timeToMinutes(normHam));
+  if (diff <= 1) return undefined;                 // 1分以内の差異は許容（HAM -1分仕様）
   return { sheetsEndTime: normSheets, hamEndTime: normHam };
 }
 
@@ -209,8 +219,8 @@ export function checkServiceMismatch(
 
   const sheetsIsMedical = st1 === '医療' || st1 === '精神医療';
   const sheetsIsKaigo = st1 === '介護';
-  const hamIsKaigoHoukanService = /訪看Ⅰ[１-５]|予訪看/.test(hamService);
-  const hamIsMedicalTherapy = hamService.includes('療養費') || hamService.includes('精神科');
+  const hamIsKaigoHoukanService = /訪看Ⅰ[１-５]|訪看Ⅱ[１-５]|予訪看|定期巡回|夜間対応/.test(hamService);
+  const hamIsMedicalTherapy = hamService.includes('療養費') || hamService.includes('精神科') || hamService.includes('訪問看護基本療養費');
 
   // I5 rehab -- ambiguous insurance type, skip per D-08
   if (hamService.includes('Ⅰ５') || hamService.includes('I5')) return undefined;
@@ -252,8 +262,9 @@ export function checkStaffMismatch(
   hamServiceContent: string,
   staffQualifications: Map<string, string>,
 ): { sheetsStaffName: string; hamStaffName: string; qualificationIssue?: string } | undefined {
-  const normSheets = normalizeCjkName(sheetsStaffName);
-  const normHam = normalizeCjkName(hamStaffName);
+  // Sheets のスタッフ名は資格前缀付き（例: "准看護師-冨迫広美"）→ 除去 + エイリアス解決してから比較
+  const normSheets = normalizeCjkName(resolveStaffAlias(extractPlainName(sheetsStaffName)));
+  const normHam = normalizeCjkName(resolveStaffAlias(extractPlainName(hamStaffName)));
 
   // Name mismatch
   if (normSheets !== normHam) {
@@ -463,23 +474,16 @@ export class ReconciliationService {
    *
    * @param csvPath 8-1 スケジュールデータ CSV パス
    * @param sheetsRecords 検証対象の転記済みレコード（呼び出し元でフィルタ済み）
+   * @param allRecords 全レコード（エラー含む）。HAM余剰判定に必須（全ステータスのキー別カウントで余剰を判定）
    * @returns フィールドレベル検証結果
    */
   async verify(
     csvPath: string,
     sheetsRecords: TranscriptionRecord[],
+    allRecords: TranscriptionRecord[],
   ): Promise<VerificationResult> {
-    // ── CSV パース + フィルタリング ──
-    const hamEntries = this.parseScheduleCsv(csvPath);
-    const filteredEntries = hamEntries.filter(e => {
-      if (TEST_PATIENT_PATTERNS.some(p => e.patientName.includes(p))) return false;
-      if (e.startTime === '12:00' && e.endTime === '12:00') return false;
-      if (e.serviceContent.includes('超減算') || e.serviceContent.includes('月超')) return false;
-      return true;
-    });
-
-    // ── リハビリ 20 分セグメント結合 ──
-    const mergedEntries = this.mergeRehabSegments(filteredEntries);
+    // ── CSV パース + フィルタリング + リハビリ結合 + HAM重複排除 ──
+    const mergedEntries = this.parseAndMergeScheduleCsv(csvPath);
 
     // ── HAM マップ構築 ──
     const hamMap = new Map<string, ScheduleEntry[]>();
@@ -491,7 +495,8 @@ export class ReconciliationService {
 
     // ── Sheets レコード走査 + フィールドレベル検証 (D-06: per-record aggregation) ──
     const mismatches: VerificationMismatch[] = [];
-    const matchedHamKeys = new Set<string>();
+    // HAM レコードの消費数をキーごとにカウント（重複検出用）
+    const hamConsumedCount = new Map<string, number>();
     let matchedCount = 0;
 
     for (const r of sheetsRecords) {
@@ -513,13 +518,17 @@ export class ReconciliationService {
         continue;
       }
 
-      matchedHamKeys.add(key);
+      hamConsumedCount.set(key, (hamConsumedCount.get(key) || 0) + 1);
 
-      // Find best matching HAM record (per Pitfall 3: multi-staff visits)
-      // Try exact endTime match first, then first entry
-      const bestHam = hamRecords.find(h =>
-        this.normalizeTime(h.endTime) === this.normalizeTime(r.endTime)
-      ) || hamRecords[0];
+      // Find best matching HAM record (multi-staff visits: staff name → endTime → first)
+      const sheetsStaffNorm = normalizeCjkName(resolveStaffAlias(extractPlainName(r.staffName)));
+      const bestHam =
+        // 1st: スタッフ名一致（CJK正規化 + 資格前缀除去 + エイリアス解決）
+        hamRecords.find(h => normalizeCjkName(resolveStaffAlias(extractPlainName(h.staffName))) === sheetsStaffNorm)
+        // 2nd: 終了時刻一致
+        || hamRecords.find(h => this.normalizeTime(h.endTime) === this.normalizeTime(r.endTime))
+        // 3rd: 先頭エントリ
+        || hamRecords[0];
 
       // Build mismatch object (D-06: aggregate all field mismatches)
       const timeMismatch = checkTimeMismatch(r.endTime, bestHam.endTime);
@@ -554,10 +563,22 @@ export class ReconciliationService {
     }
 
     // ── REC-05: extraInHam detection ──
+    // Sheets 全レコードのキー別カウント（エラー含む全ステータス）
+    const allSheetsKeyCount = new Map<string, number>();
+    for (const r of allRecords) {
+      const key = this.makeMatchKey(r.patientName, r.visitDate, r.startTime);
+      allSheetsKeyCount.set(key, (allSheetsKeyCount.get(key) || 0) + 1);
+    }
+
     const extraInHam: ExtraInHamRecord[] = [];
     for (const [key, entries] of hamMap) {
-      if (matchedHamKeys.has(key)) continue;
-      for (const e of entries) {
+      // Sheets 側の件数（全ステータス合計）を取得
+      const sheetsCount = allSheetsKeyCount.get(key) || 0;
+      // HAM 件数が Sheets 件数以下 → 余剰なし
+      if (entries.length <= sheetsCount) continue;
+      // 差分のみ余剰として報告（末尾から余った分を取得）
+      const extraEntries = entries.slice(sheetsCount);
+      for (const e of extraEntries) {
         extraInHam.push({
           patientName: e.patientName,
           visitDate: e.visitDate,
@@ -775,6 +796,21 @@ export class ReconciliationService {
     return entries;
   }
 
+  /**
+   * 8-1 CSV をパースし、フィルタリング + リハビリ結合 + HAM重複排除を適用した結果を返す。
+   * verify() や verifyCorrectionRecords 等、処理済みデータが必要な場面で使用する。
+   */
+  parseAndMergeScheduleCsv(csvPath: string): ScheduleEntry[] {
+    const raw = this.parseScheduleCsv(csvPath);
+    const filtered = raw.filter(e => {
+      if (TEST_PATIENT_PATTERNS.some(p => e.patientName.includes(p))) return false;
+      if (e.startTime === '12:00' && e.endTime === '12:00') return false;
+      if (e.serviceContent.includes('超減算') || e.serviceContent.includes('月超')) return false;
+      return true;
+    });
+    return this.mergeRehabSegments(filtered);
+  }
+
   // ─── プライベートヘルパー ───
 
   /**
@@ -817,67 +853,140 @@ export class ReconciliationService {
   }
 
   /**
-   * リハビリの 20 分セグメントを結合
+   * リハビリセグメント結合 + HAM 重複行の排除
    *
-   * Kanamic は訪看Ⅰ５/予訪看Ⅰ５（リハビリ 20 分）を分割して記録するが、
-   * Sheets は全体の訪問時間で記録する。
+   * HAM の 8-1 CSV には以下の特性がある:
    *
-   * グループ化: 患者 + 日付 + スタッフ名
-   *   - 同一担当者の連続セグメントを1セッションに結合する
-   *   - 同日に複数のセラピストが同一患者を担当する場合も正しく分離できる
-   *   （例: 藤野 10:40-11:20 と 石坂 11:00-11:40 は別セッションとして扱う）
+   * 1. 介護保険リハビリ（訪看Ⅰ５/予訪看Ⅰ５）:
+   *    20分セグメントに分割して記録される。
+   *    → 患者+日付+スタッフ名でグループ化し、開始〜終了を結合する。
+   *
+   * 2. HAM 重複行（全サービス共通）:
+   *    医療保険の訪問看護（療養費、精神科、理学療法士等）で、
+   *    同一訪問に対してスタッフあり/なしの重複行が出力される。
+   *    → 患者+日付+開始時刻+サービス内容でグループ化し、
+   *       スタッフ名がある行を優先して1行に集約する。
    */
   private mergeRehabSegments(entries: ScheduleEntry[]): ScheduleEntry[] {
-    const isRehab = (e: ScheduleEntry) =>
+    // ── STEP 1: 介護保険リハビリ 20分セグメント結合 ──
+    const isKaigoRehab = (e: ScheduleEntry) =>
       e.serviceContent.includes('訪看Ⅰ５') || e.serviceContent.includes('予訪看Ⅰ５');
 
-    const nonRehab = entries.filter(e => !isRehab(e));
-    const rehab = entries.filter(e => isRehab(e));
+    const nonKaigoRehab = entries.filter(e => !isKaigoRehab(e));
+    const kaigoRehab = entries.filter(e => isKaigoRehab(e));
 
-    if (rehab.length === 0) return entries;
-
-    // 患者 + 日付 + スタッフ名でグループ化
-    const groups = new Map<string, ScheduleEntry[]>();
-    for (const e of rehab) {
-      const normName = this.normalizeNameForKey(e.patientName);
-      const normDate = this.normalizeDate(e.visitDate);
-      const normStaff = this.normalizeNameForKey(e.staffName);
-      const key = `${normName}|${normDate}|${normStaff}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(e);
+    // グループ化: 患者 + 日付 + スタッフ名
+    const kaigoGroups = new Map<string, ScheduleEntry[]>();
+    for (const e of kaigoRehab) {
+      const key = `${this.normalizeNameForKey(e.patientName)}|${this.normalizeDate(e.visitDate)}|${this.normalizeNameForKey(e.staffName)}`;
+      if (!kaigoGroups.has(key)) kaigoGroups.set(key, []);
+      kaigoGroups.get(key)!.push(e);
     }
 
-    // 各グループを結合: 最初のセグメントの開始時刻 + 最後のセグメントの終了時刻
-    const merged: ScheduleEntry[] = [];
-    for (const [, segs] of groups) {
-      const sorted = segs.sort((a, b) => a.startTime.localeCompare(b.startTime));
-      const first = sorted[0];
-      const last = sorted[sorted.length - 1];
-      merged.push({
-        patientName: first.patientName,
-        visitDate: first.visitDate,
-        startTime: first.startTime,
-        endTime: last.endTime,
-        staffName: first.staffName,
-        serviceName: first.serviceName,
-        serviceContent: first.serviceContent,
-        resultFlag: first.resultFlag,
-        csvRow: first.csvRow,
-      });
+    // 時刻を分数に変換（ギャップ判定用）
+    const toMinutes = (t: string): number => {
+      const m = t.match(/^(\d{1,2}):(\d{2})/);
+      return m ? parseInt(m[1]) * 60 + parseInt(m[2]) : -1;
+    };
+
+    const kaigoMerged: ScheduleEntry[] = [];
+    for (const [, segs] of kaigoGroups) {
+      const sorted = [...segs].sort((a, b) => a.startTime.localeCompare(b.startTime));
+      // 連続性で分割: prev.endTime と curr.startTime のギャップが 1分以下のみ連結
+      // 例: 濵田博子 4/9 11:00-11:40 と 14:20-15:00 は同一staffだが別session
+      let currentSession: ScheduleEntry[] = [];
+      const flushSession = () => {
+        if (currentSession.length === 0) return;
+        const first = currentSession[0];
+        const last = currentSession[currentSession.length - 1];
+        kaigoMerged.push({
+          patientName: first.patientName,
+          visitDate: first.visitDate,
+          startTime: first.startTime,
+          endTime: last.endTime,
+          staffName: first.staffName,
+          serviceName: first.serviceName,
+          serviceContent: first.serviceContent,
+          resultFlag: first.resultFlag,
+          csvRow: first.csvRow,
+        });
+        currentSession = [];
+      };
+      for (const seg of sorted) {
+        if (currentSession.length === 0) {
+          currentSession.push(seg);
+          continue;
+        }
+        const prevEnd = toMinutes(currentSession[currentSession.length - 1].endTime);
+        const currStart = toMinutes(seg.startTime);
+        if (prevEnd >= 0 && currStart >= 0 && currStart - prevEnd <= 1) {
+          // 連続: 現セッションに追加
+          currentSession.push(seg);
+        } else {
+          // ギャップあり: 現セッション完了 + 新セッション開始
+          flushSession();
+          currentSession.push(seg);
+        }
+      }
+      flushSession();
     }
 
-    logger.debug(`リハビリ結合: ${rehab.length} セグメント → ${merged.length} セッション`);
-    return [...nonRehab, ...merged];
+    if (kaigoRehab.length > 0) {
+      logger.debug(`介護リハビリ結合: ${kaigoRehab.length} セグメント → ${kaigoMerged.length} セッション`);
+    }
+
+    // ── STEP 2: HAM 重複行の排除（全サービス共通） ──
+    // 患者+日付+開始時刻+終了時刻+サービス内容が同一の行をグループ化し、
+    // スタッフ名がある行を優先して重複を排除する。
+    // endTime を含めることで、同一開始時刻だが異なる訪問（終了時刻違い）を誤マージしない。
+    const allAfterStep1 = [...nonKaigoRehab, ...kaigoMerged];
+    const dedupGroups = new Map<string, ScheduleEntry[]>();
+    for (const e of allAfterStep1) {
+      const key = `${this.normalizeNameForKey(e.patientName)}|${this.normalizeDate(e.visitDate)}|${this.normalizeTime(e.startTime)}|${this.normalizeTime(e.endTime)}|${e.serviceContent}`;
+      if (!dedupGroups.has(key)) dedupGroups.set(key, []);
+      dedupGroups.get(key)!.push(e);
+    }
+
+    const dedupResult: ScheduleEntry[] = [];
+    let dedupCount = 0;
+    for (const [, dupes] of dedupGroups) {
+      if (dupes.length === 1) {
+        dedupResult.push(dupes[0]);
+        continue;
+      }
+      // 重複あり: スタッフ名がある行を優先して1行に集約
+      const withStaff = dupes.filter(d => d.staffName.trim() !== '');
+      if (withStaff.length > 0) {
+        // スタッフ付き行から一意のスタッフのみ残す
+        const seenStaff = new Set<string>();
+        for (const d of withStaff) {
+          const normStaff = this.normalizeNameForKey(d.staffName);
+          if (!seenStaff.has(normStaff)) {
+            seenStaff.add(normStaff);
+            dedupResult.push(d);
+          }
+        }
+      } else {
+        // 全てスタッフなし → 1行だけ残す
+        dedupResult.push(dupes[0]);
+      }
+      dedupCount += dupes.length - (withStaff.length > 0
+        ? new Set(withStaff.map(d => this.normalizeNameForKey(d.staffName))).size
+        : 1);
+    }
+
+    if (dedupCount > 0) {
+      logger.debug(`HAM 重複行排除: ${allAfterStep1.length} 行 → ${dedupResult.length} 行（${dedupCount} 行除外）`);
+    }
+
+    return dedupResult;
   }
 
   /**
    * 患者名/スタッフ名を正規化（マッチキー用）
    */
   private normalizeNameForKey(name: string): string {
-    return name
-      .normalize('NFKC')
-      .replace(/[\s\u3000\u00a0]+/g, '')
-      .trim();
+    return normalizeCjkName(name);
   }
 
   /**
