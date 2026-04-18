@@ -77,7 +77,23 @@ export class DeletionWorkflow extends BaseWorkflow {
     let nav = await this.auth.ensureLoggedIn();
 
     // 月次Sheet から recordId → HAM assignId マップ＋転記済みレコードID集合を構築
-    const { assignIds: assignIdMap, registeredIds } = await this.sheets.getAssignIdMap(location.sheetId);
+    // 削除対象レコードの visitDate から対象月タブを特定（跨月対応）
+    const monthTabsForAssignId = new Set<string>();
+    for (const r of targets) {
+      const tab = this.visitDateToMonthTab(r.visitDate);
+      if (tab) monthTabsForAssignId.add(tab);
+    }
+    const assignIdMap = new Map<string, string>();
+    let registeredIds: Set<string> | null = new Set<string>();
+    for (const tab of monthTabsForAssignId) {
+      const result = await this.sheets.getAssignIdMap(location.sheetId, tab);
+      for (const [k, v] of result.assignIds) assignIdMap.set(k, v);
+      if (result.registeredIds) {
+        for (const id of result.registeredIds) registeredIds!.add(id);
+      } else {
+        registeredIds = null;
+      }
+    }
     if (assignIdMap.size > 0) {
       logger.info(`HAM assignId マップ: ${assignIdMap.size}件ロード完了`);
     }
@@ -120,16 +136,21 @@ export class DeletionWorkflow extends BaseWorkflow {
               ].some(k => errMsg.includes(k));
 
               if (isServerError) {
-                const waitSec = 10 * _attempt;
+                // HAM 服务端限流 / syserror からの復旧には余裕が必要。
+                // 30s → 60s → 120s のバックオフ（180s 上限）。
+                const waitSec = Math.min(30 * Math.pow(2, _attempt - 1), 180);
                 logger.warn(`削除: サーバーエラー検出 — ${waitSec}秒待機後にリトライ: ${errMsg.substring(0, 100)}`);
                 await this.sleep(waitSec * 1000);
               }
 
-              logger.info('削除: ページ復旧 → ensureLoggedIn → 利用者検索まで再遷移');
+              // 復旧は t1-2（メインメニュー）まで戻すだけにする。
+              // processRecord の Step 1 が状態感知で k1_1 / k2_1 まで自力遷移するため、
+              // ここで先回りして k2_1 まで進めると processRecord 側が k2_1 から
+              // act_k1_1 を再送信してしまい waitForMainFrame('k1_1') が必ず
+              // 15秒タイムアウトする（onRetry 過度遷移バグ）。
+              logger.info('削除: ページ復旧 → ensureLoggedIn → メインメニューまで復帰');
               nav = await this.auth.ensureLoggedIn();
               await this.auth.navigateToMainMenu();
-              await this.auth.navigateToBusinessGuide();
-              await this.auth.navigateToUserSearch();
             },
           }
         );
@@ -210,17 +231,89 @@ export class DeletionWorkflow extends BaseWorkflow {
 
     logger.info(`削除開始: ${record.recordId} - ${record.patientName} (${record.visitDate} ${record.startTime})${hasAssignId ? ` [assignId=${storedAssignId}]` : ' [フォールバック: 日時マッチ]'}`);
 
-    // === Step 1: メインメニュー → 業務ガイド → 利用者検索 ===
-    await this.auth.navigateToBusinessGuide();
-    await this.auth.navigateToUserSearch();
+    // === Step 1: 利用者検索 (k2_1) まで遷移（状態感知） ===
+    // リトライ経路や前回レコードの完了状態により、開始時の pageId は
+    // t1-2 / k1_1 / k2_1 / k2_2 のいずれも有り得る。盲目的に
+    // navigateToBusinessGuide(act_k1_1) を再送信すると k2_1 からでは
+    // 無効遷移となり waitForMainFrame('k1_1') が 15 秒タイムアウトする。
+    // 転記ワークフローと同じ状態感知ロジックで k2_1 まで自力遷移する。
+    await this.ensureAtUserSearch(nav);
     logger.debug('Step 1: 利用者検索に遷移');
 
     // === Step 2: 年月設定 → 全患者検索 ===
+    //
+    // 注意: HAM 利用者検索は検索前後とも pageId=k2_1 のまま。URL も変わらず
+    // `document.forms[0]` も常に存在するため、submitForm({waitForPageId:'k2_1'})
+    // は即座に return してしまい act_search の完了を待たない。
+    // その結果 sleep(1000) だけで findPatientId を呼ぶと、検索結果テーブルが
+    // まだサーバーから届いておらず「患者が見つかりません」と誤判定される
+    // （特に福岡のように利用者数が多い事業所で頻発）。
+    //
+    // 転記ワークフローと同じ 3段階ウェイトで検索完了を確実に検出する:
+    //   1) DOM マーカー消滅 → ページリロードを確認 (最大20s)
+    //   2) waitForMainFrame('k2_1') → 新しい k2_1 フレーム到達
+    //   3) 決定ボタン数が連続安定 → 検索結果の描画完了
     const monthStart = toHamMonthStart(record.visitDate);
     await nav.setSelectValue('searchdate', monthStart);
-    await nav.submitForm({ action: 'act_search', waitForPageId: 'k2_1' });
-    await this.sleep(1000);
-    logger.debug(`Step 2: 患者検索実行 (${monthStart})`);
+
+    // Phase 0: リロード検出用 DOM マーカー埋め込み
+    const preSearchFrame = await nav.getMainFrame('k2_1');
+    await preSearchFrame.evaluate(() => {
+      document.body.setAttribute('data-rpa-pre-search', '1');
+    }).catch(() => {});
+
+    await nav.submitForm({ action: 'act_search' });
+
+    // Phase 1: DOM マーカー消滅（ページリロード完了）
+    let markerDisappeared = false;
+    for (let waitIdx = 0; waitIdx < 40; waitIdx++) {
+      await this.sleep(500);
+      try {
+        const f = await nav.getMainFrame();
+        const markerStillExists = await f.evaluate(() =>
+          document.body?.hasAttribute('data-rpa-pre-search')
+        ).catch(() => false);
+        if (!markerStillExists) { markerDisappeared = true; break; }
+      } catch {
+        markerDisappeared = true;
+        break;
+      }
+    }
+    if (!markerDisappeared) {
+      await this.checkForSyserror(nav);
+      throw new Error('DOM マーカーが20秒以内に消滅しませんでした — act_search の submit が未反映の可能性');
+    }
+
+    // Phase 2: k2_1 フレーム到達待ち
+    await nav.waitForMainFrame('k2_1', 15000);
+    await this.sleep(500);
+
+    // Phase 3: 検索結果の安定性チェック（決定ボタン数が連続2ラウンド同じで>0）
+    let finalCount = 0;
+    {
+      let prevCount = -1;
+      let stableRounds = 0;
+      for (let stabilityIdx = 0; stabilityIdx < 10; stabilityIdx++) {
+        const searchFrame = await nav.getMainFrame('k2_1');
+        const currentCount = await searchFrame.evaluate(() =>
+          document.querySelectorAll('input[name="act_result"][value="決定"]').length
+        ).catch(() => 0);
+        if (currentCount === prevCount && currentCount > 0) {
+          stableRounds++;
+          if (stableRounds >= 2) { finalCount = currentCount; break; }
+        } else {
+          stableRounds = 0;
+        }
+        prevCount = currentCount;
+        await this.sleep(500);
+      }
+      if (finalCount === 0) finalCount = prevCount;
+    }
+    logger.debug(`Step 2: 患者検索実行 (${monthStart}), 決定ボタン=${finalCount}件`);
+
+    // 検索結果ロード後のサーバーエラーチェック
+    // （OOM / syserror がレスポンスに混入した場合「患者未検出」と誤認しないため）
+    await this.checkForSyserror(nav);
 
     // === Step 3: 患者特定 → k2_2 へ遷移 ===
     const patientId = await this.findPatientId(nav, record.patientName);
@@ -598,6 +691,8 @@ export class DeletionWorkflow extends BaseWorkflow {
 
   /**
    * k2_1 の検索結果から患者 ID (careuserid) を取得（患者名による検索）
+   *
+   * 見つからない場合は k2_1 内の候補名をログに出力して診断を助ける。
    */
   private async findPatientId(nav: HamNavigator, patientName: string): Promise<string | null> {
     const frame = await nav.getMainFrame('k2_1');
@@ -643,7 +738,7 @@ export class DeletionWorkflow extends BaseWorkflow {
         if (rowText.includes(normalizedName)) {
           const onclick = btn.getAttribute('onclick') || '';
           const id = extractCareUserId(onclick);
-          if (id) return id;
+          if (id) return { id, diag: null };
         }
       }
 
@@ -656,17 +751,48 @@ export class DeletionWorkflow extends BaseWorkflow {
         const rowTextNorm = normalize(row.replace(/<[^>]*>/g, ''));
         if (rowTextNorm.includes(normalizedName)) {
           const id = extractCareUserId(row);
-          if (id) return id;
+          if (id) return { id, diag: null };
         }
       }
 
-      return null;
+      // 未検出 → 診断情報収集
+      const diagNames: string[] = [];
+      let hiddenCount = 0;
+      for (const btn of allButtons) {
+        const tr = btn.closest('tr');
+        if (!tr) continue;
+        const rawText = tr.textContent || '';
+        if (rawText.includes('(非表示)')) { hiddenCount++; continue; }
+        const cells = tr.querySelectorAll('td');
+        if (cells.length >= 2) {
+          const raw = (cells[1].textContent || '').trim();
+          if (raw) diagNames.push(raw);
+        }
+      }
+      return {
+        id: null,
+        diag: {
+          total: allButtons.length,
+          hiddenCount,
+          searchName: normalizedName,
+          sampleNames: diagNames.slice(0, 15),
+        },
+      };
     }, { name: patientName, variantMap: CJK_VARIANT_MAP_SERIALIZABLE });
 
-    if (result) {
-      logger.debug(`患者ID検出: ${patientName} → ${result}`);
+    if (result?.id) {
+      logger.debug(`患者ID検出: ${patientName} → ${result.id}`);
+      return result.id;
     }
-    return result;
+    if (result?.diag) {
+      const d = result.diag;
+      logger.warn(
+        `患者未検出: 「${patientName}」(正規化: ${d.searchName}) — ` +
+        `k2_1 決定ボタン=${d.total}件（うち非表示=${d.hiddenCount}件）, ` +
+        `候補先頭15件: [${d.sampleNames.join(' / ')}]`,
+      );
+    }
+    return null;
   }
 
   /**
@@ -781,6 +907,84 @@ export class DeletionWorkflow extends BaseWorkflow {
     const parts = normalized.split('-');
     if (parts.length < 2 || !parts[0] || !parts[1]) return '';
     return `${parts[0]}年${parts[1].padStart(2, '0')}月`;
+  }
+
+  /**
+   * 現在の pageId に関わらず k2_1（利用者検索）まで自力遷移する（冪等）
+   *
+   * 期待される開始状態:
+   *   - k2_1 → 何もしない
+   *   - k2_2 → 「戻る」ボタンで k2_1 へ
+   *   - その他 → navigateToMainMenu → navigateToBusinessGuide → navigateToUserSearch
+   *
+   * 転記ワークフローの processRecord Step 1-2（transcription.workflow.ts:1490-1507）
+   * と同じ設計。盲目的に act_k1_1 を再送信して waitForMainFrame('k1_1') で
+   * 15 秒ブロックする事故を防ぐ。
+   */
+  private async ensureAtUserSearch(nav: HamNavigator): Promise<void> {
+    const currentPageId = await nav.getCurrentPageId();
+    if (currentPageId === 'k2_1') {
+      logger.debug('ensureAtUserSearch: 既に k2_1 — スキップ');
+      return;
+    }
+    if (currentPageId === 'k2_2') {
+      logger.debug('ensureAtUserSearch: k2_2 → 戻るで k2_1 へ');
+      await this.clickBackButtonOnK2_2(nav);
+      return;
+    }
+    if (currentPageId && currentPageId !== 't1-2') {
+      await this.auth.navigateToMainMenu();
+    }
+    await this.auth.navigateToBusinessGuide();
+    await this.auth.navigateToUserSearch();
+  }
+
+  /**
+   * k2_2 上の「戻る」ボタンをクリックして k2_1 へ戻す
+   *
+   * act_back を form submit するより信頼性が高い（k2_2 の戻るボタンは
+   * submitTargetForm(this.form, 'k2_1') を呼ぶ）。
+   */
+  private async clickBackButtonOnK2_2(nav: HamNavigator): Promise<void> {
+    const hamPage = nav.hamPage;
+    let clicked = false;
+
+    for (const frame of hamPage.frames()) {
+      try {
+        const backBtn = await frame.$('input[name="act_back"][value="戻る"]');
+        if (backBtn) {
+          await frame.evaluate(() => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            (window as any).submited = 0;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+          });
+          await backBtn.click();
+          clicked = true;
+          break;
+        }
+      } catch (e) {
+        logger.debug(`k2_2 戻るボタン検索エラー: ${(e as Error).message}`);
+      }
+    }
+
+    if (!clicked) {
+      logger.warn('k2_2 の「戻る」ボタンが見つかりません → navigateToMainMenu + 再遷移にフォールバック');
+      await this.auth.navigateToMainMenu();
+      await this.auth.navigateToBusinessGuide();
+      await this.auth.navigateToUserSearch();
+      return;
+    }
+
+    // k2_1 に戻るまで最大15秒待機
+    for (let i = 0; i < 15; i++) {
+      await this.sleep(1000);
+      const pageId = await nav.getCurrentPageId();
+      if (pageId === 'k2_1') {
+        logger.debug('k2_2 → k2_1 に戻った');
+        return;
+      }
+    }
+    throw new Error('clickBackButtonOnK2_2: k2_1 への遷移が15秒以内に完了しませんでした');
   }
 
   private sleep(ms: number): Promise<void> {
