@@ -151,9 +151,23 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     // 重複ペア跨レコードバリデーション: 同一キーのグループでいずれかのP列が空 → 全員ブロック
-    const duplicateBlocked = this.buildDuplicateBlockedSet(records);
+    const { blocked: duplicateBlocked, reasons: duplicateBlockReasons } = this.buildDuplicateBlockedSet(records);
     if (duplicateBlocked.size > 0) {
-      logger.info(`重複ペア未判定でブロック: ${duplicateBlocked.size}件 (P列未入力のペアあり)`);
+      logger.info(`重複ペアブロック: ${duplicateBlocked.size}件`);
+    }
+
+    // V列にブロック理由を書き込む（転記フラグは変更しない — 選項A: 動的再判定）
+    if (duplicateBlockReasons.size > 0) {
+      const recordsByRecordId = new Map(records.map(r => [r.recordId, r]));
+      for (const [recordId, reason] of duplicateBlockReasons) {
+        const rec = recordsByRecordId.get(recordId);
+        if (!rec) continue;
+        try {
+          await this.sheets.writeErrorDetail(location.sheetId, rec.rowIndex, reason, tab);
+        } catch (e) {
+          logger.warn(`重複blockエラー詳細書き込み失敗 ${recordId}: ${(e as Error).message}`);
+        }
+      }
     }
 
     let targets = records.filter(r => {
@@ -246,12 +260,43 @@ export class TranscriptionWorkflow extends BaseWorkflow {
 
     // === スタッフ事前チェック＋自動補登 ===
     let unregisteredStaff = new Set<string>();
+    let preflightFailed = false;
     try {
       unregisteredStaff = await this.ensureStaffRegistered(nav, targets);
     } catch (err) {
-      logger.error(`スタッフ事前チェックエラー（転記は続行）: ${(err as Error).message}`);
-      // エラー後にメインメニューに復帰
+      preflightFailed = true;
+      logger.error(`スタッフ事前チェックエラー: ${(err as Error).message}`);
       try { await this.auth.navigateToMainMenu(); } catch (navErr) { logger.debug(`メインメニュー復帰失敗: ${(navErr as Error).message}`); }
+    }
+
+    // preflight 失敗時のフェイルセーフ: 全 target を保留して次回 cron 再試行
+    // (unregisteredStaff が空のまま転記ループに入ると、未補登スタッフのレコードが
+    // k2_2f スタッフ選択で失敗し mapError で "HAMに登録されていません" と誤分類される)
+    if (preflightFailed) {
+      logger.warn(
+        `[${location.name}] 事前チェック失敗により 全${targets.length}件を保留 (V列書込、次回cron再試行)`,
+      );
+      for (const record of targets) {
+        try {
+          await this.sheets.writeErrorDetail(
+            location.sheetId,
+            record.rowIndex,
+            '事前チェック失敗: HAMスタッフマスタ取得不可、次回cron再試行',
+            tab,
+          );
+        } catch (e) {
+          logger.warn(`V列書込失敗 ${record.recordId}: ${(e as Error).message}`);
+        }
+      }
+      return {
+        workflowName: WORKFLOW_NAME,
+        success: true,
+        totalRecords: records.length,
+        processedRecords: 0,
+        errorRecords: 0,
+        errors: [],
+        duration: 0,
+      };
     }
 
     // 補登失敗のスタッフのレコードを事前にエラーマーク
@@ -1312,7 +1357,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
    *
    * @returns ブロック対象の recordId セット
    */
-  private buildDuplicateBlockedSet(records: TranscriptionRecord[]): Set<string> {
+  private buildDuplicateBlockedSet(records: TranscriptionRecord[]): {
+    blocked: Set<string>;
+    reasons: Map<string, string>;
+  } {
     // Step 1: 重複レコードをキーでグループ化
     const groups = new Map<string, TranscriptionRecord[]>();
     for (const r of records) {
@@ -1323,7 +1371,29 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     }
 
     const blocked = new Set<string>();
+    const reasons = new Map<string, string>();
     for (const [key, group] of groups) {
+      // Step 2a-pre: グループ内に既に転記済みレコードがある場合、
+      // 未転記の重複レコードは全て block（HAM への二重登録防止）。
+      // スタッフ変更等で置換したい場合は修正管理を使用する。
+      const transcribed = group.filter(r => r.transcriptionFlag === '転記済み');
+      if (transcribed.length > 0) {
+        const transcribedIds = transcribed.map(t => t.recordId).join(',');
+        for (const r of group) {
+          if (r.transcriptionFlag !== '転記済み') {
+            blocked.add(r.recordId);
+            reasons.set(
+              r.recordId,
+              `重複block: 同key転記済みあり(${transcribedIds}) — スタッフ/日付変更は修正管理を使用`,
+            );
+          }
+        }
+        logger.info(
+          `重複グループ ${key}: 既転記 ${transcribed.length}件あり → 未転記 ${group.length - transcribed.length}件をblock`,
+        );
+        continue;
+      }
+
       // Step 2a: いずれかの P列が空 → グループ全体をブロック
       if (group.some(r => !r.accompanyClerkCheck.trim())) {
         for (const r of group) {
@@ -1362,7 +1432,7 @@ export class TranscriptionWorkflow extends BaseWorkflow {
         `重複グループ ${key}: ${group.length}件中「${winner.staffName}」(${winner.recordId}) を転記対象に選択`
       );
     }
-    return blocked;
+    return { blocked, reasons };
   }
 
   /**
@@ -2845,8 +2915,30 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     nav: HamNavigator,
     targets: TranscriptionRecord[],
   ): Promise<Set<string>> {
-    // HAM の登録済みスタッフ名を取得
-    const hamStaffNames = await this.fetchHamStaffNames(nav);
+    // HAM の登録済みスタッフ名を取得 (h1-1 遷移が一時的に不安定なため 3 回リトライ)
+    let hamStaffNames: Set<string> | null = null;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        hamStaffNames = await this.fetchHamStaffNames(nav);
+        if (attempt > 1) logger.info(`fetchHamStaffNames attempt ${attempt} で成功`);
+        break;
+      } catch (e) {
+        lastError = e as Error;
+        logger.warn(`fetchHamStaffNames attempt ${attempt}/3 失敗: ${lastError.message}`);
+        if (attempt < 3) {
+          await this.sleep(3000);
+          try {
+            await this.auth.navigateToMainMenu();
+          } catch (navErr) {
+            logger.debug(`retry前メインメニュー復帰失敗: ${(navErr as Error).message}`);
+          }
+        }
+      }
+    }
+    if (!hamStaffNames) {
+      throw lastError || new Error('fetchHamStaffNames 3回リトライ全て失敗');
+    }
 
     // 転記対象の一意なスタッフを抽出
     const staffMap = new Map<string, { staffName: string; staffNumber: string }>();
@@ -2929,9 +3021,10 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       const syncResult = await this.staffSync.registerSpecificStaff(entriesToRegister);
       logger.info(`スタッフ補登結果: 登録=${syncResult.synced}, スキップ=${syncResult.skipped}, エラー=${syncResult.errors}`);
 
-      // 登録失敗したスタッフを特定
+      // 登録失敗したスタッフを特定 (phase1/2/3 いずれか error なら補登未完了扱い)
       for (const detail of syncResult.details) {
-        if (detail.phase1 === 'error') {
+        if (detail.phase1 === 'error' || detail.phase2 === 'error' || detail.phase3 === 'error') {
+          logger.warn(`補登未完了: ${detail.staffName} phase1=${detail.phase1}, phase2=${detail.phase2}, phase3=${detail.phase3}`);
           failedNames.add(detail.staffName);
         }
       }

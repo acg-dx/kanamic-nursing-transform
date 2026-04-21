@@ -135,6 +135,18 @@ export class SpreadsheetService {
     logger.debug(`転記ステータス更新: row=${rowIndex}, status=${status}`);
   }
 
+  /** V列（エラー詳細）のみ書き込む。T列転記フラグは変更しない。 */
+  async writeErrorDetail(sheetId: string, rowIndex: number, errorDetail: string, tab?: string): Promise<void> {
+    tab = tab || getCurrentMonthTab();
+    await this.sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `${tab}!${colToLetter(COL_ERROR_DETAIL)}${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[errorDetail]] },
+    });
+    logger.debug(`エラー詳細書き込み: row=${rowIndex}, detail=${errorDetail.substring(0, 50)}`);
+  }
+
   async writeDataFetchedAt(sheetId: string, rowIndex: number, timestamp: string, tab?: string): Promise<void> {
     tab = tab || getCurrentMonthTab();
     await this.sheets.spreadsheets.values.update({
