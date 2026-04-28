@@ -38,7 +38,7 @@ import type { TranscriptionRecord, CorrectionRecord } from '../../types/spreadsh
 import type { SheetLocation } from '../../types/config.types';
 import type { SmartHRService } from '../../services/smarthr.service';
 import type { StaffSyncService } from '../../workflows/staff-sync/staff-sync.workflow';
-import { ReconciliationService } from '../../services/reconciliation.service';
+import { ReconciliationService, checkServiceMismatch } from '../../services/reconciliation.service';
 import type { VerificationResult, VerificationMismatch, ExtraInHamRecord } from '../../services/reconciliation.service';
 import { ScheduleCsvDownloaderService, computeVerificationDateRange } from '../../services/schedule-csv-downloader.service';
 
@@ -109,7 +109,14 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     for (const record of records) {
       if (!record.recordLocked) continue;
 
-      const isAlreadyTranscribed = record.transcriptionFlag === '転記済み' || record.transcriptionFlag === '修正あり';
+      if (record.transcriptionFlag === '修正あり') {
+        logger.info(`修正ありロック自動解除: row=${record.rowIndex}, recordId=${record.recordId}`);
+        await this.sheets.unlockRecord(location.sheetId, record.rowIndex, tab);
+        record.recordLocked = false;
+        continue;
+      }
+
+      const isAlreadyTranscribed = record.transcriptionFlag === '転記済み';
 
       if (isAlreadyTranscribed && record.updatedAt && record.dataFetchedAt) {
         // ケース1: 転記済みロック → 転記後にデータが更新されていれば再転記のためロック解除
@@ -681,6 +688,20 @@ export class TranscriptionWorkflow extends BaseWorkflow {
             logger.warn(`[${location.name}] 検証結果タブ書き込みエラー: ${(reportError as Error).message}`);
           }
         }
+
+        // ── SVC-01: 検証不一致の自動修正 ──
+        // missing_in_ham 以外の不一致（service/time/staff）を「修正あり」に設定
+        // 次回転記 run で旧HAMレコード削除 → 正しいデータで再登録される
+        // ※missing_in_ham は CSV 日付範囲不足の偽陽性リスクがあるため除外
+        const fixableMismatches = result.mismatches.filter(m => !m.missingFromHam);
+        if (fixableMismatches.length > 0) {
+          const corrected = await this.autoCorrectMismatches(
+            location, fixableMismatches, records, tab,
+          );
+          if (corrected > 0) {
+            logger.info(`[${location.name}] SVC-01: ${corrected}件の検証不一致を「修正あり」に自動設定`);
+          }
+        }
       }
 
       // ── COR-01: 修正管理シートの未処理レコードを CSV で照合し処理済みマーク ──
@@ -794,6 +815,31 @@ export class TranscriptionWorkflow extends BaseWorkflow {
           `HAM不一致(end=${sheetsEnd}/${hamEnd}, staff=${sheetsStaff}/${hamStaff}) → スキップ`
         );
         skipped++;
+        continue;
+      }
+
+      // サービス種類照合（SVC-02: COR-01 で保険種類不一致を検出）
+      // time+staff OK → 修正管理の本来の修正（時間/スタッフ変更等）は検証OK
+      // serviceType 不一致は別問題 → 修正管理は処理済みにし、月次Sheetは修正ありに設定
+      // ※処理済みにしないと次回 COR-01 が同じ correction を再処理 → 無限ループ
+      const svcMismatch = checkServiceMismatch(
+        { serviceType1: record.serviceType1, serviceType2: record.serviceType2 },
+        { serviceName: bestHam.serviceName, serviceContent: bestHam.serviceContent },
+      );
+      if (svcMismatch) {
+        logger.warn(
+          `[${location.name}] 修正管理検証: recordId=${corr.recordId} (${corr.patientName}) ` +
+          `time+staff OK だが ${svcMismatch.description} → 処理済み + 修正あり設定`
+        );
+        // 修正管理を処理済みにマーク（time+staff の修正は完了）
+        try {
+          await this.sheets.markCorrectionProcessed(location.sheetId, corr.rowIndex);
+          verified++;
+        } catch (markErr) {
+          logger.warn(`[${location.name}] SVC-02 処理済みマーク失敗 (row=${corr.rowIndex}): ${(markErr as Error).message}`);
+        }
+        // 月次Sheetを修正ありに設定（serviceType 修正は SVC-01 パイプラインに委譲）
+        await this.markForCorrection(location.sheetId, record, `[${location.name}] SVC-02`);
         continue;
       }
 
@@ -1044,6 +1090,118 @@ export class TranscriptionWorkflow extends BaseWorkflow {
       }
     }
     logger.info('─'.repeat(50));
+  }
+
+  /**
+   * 修正あり設定 + ロック解除の共通処理
+   * 修正あり先行: 失敗時に意図が記録される安全な順序。
+   * ロック解除失敗は warn で続行（修正ありは記録済み）。
+   * @returns true=修正あり設定成功
+   */
+  private async markForCorrection(
+    sheetId: string,
+    record: TranscriptionRecord,
+    context: string,
+    tab?: string,
+  ): Promise<boolean> {
+    try {
+      await this.sheets.updateTranscriptionStatus(sheetId, record.rowIndex, '修正あり', undefined, tab);
+      record.transcriptionFlag = '修正あり'; // Sync in-memory state after successful Sheet write
+      if (record.recordLocked) {
+        try {
+          await this.sheets.unlockRecord(sheetId, record.rowIndex, tab);
+        } catch (unlockErr) {
+          logger.warn(`${context}: ロック解除失敗 (${record.patientName}) — 修正ありは設定済み: ${(unlockErr as Error).message}`);
+        }
+      }
+      return true;
+    } catch (err) {
+      logger.error(`${context}: 修正あり設定エラー (${record.patientName}): ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * SVC-01: 検証不一致の自動修正
+   *
+   * verify() で検出された不一致（missing_in_ham 以外）を修正あり に設定し、
+   * 次回転記 run で旧HAMレコード削除 → 正しいデータで再登録させる。
+   *
+   * @returns 自動修正した件数
+   */
+  private async autoCorrectMismatches(
+    location: SheetLocation,
+    mismatches: VerificationMismatch[],
+    records: TranscriptionRecord[],
+    tab?: string,
+  ): Promise<number> {
+    const recordMap = new Map<string, TranscriptionRecord>();
+    for (const r of records) recordMap.set(r.recordId, r);
+
+    let corrected = 0;
+
+    for (const mm of mismatches) {
+      const record = recordMap.get(mm.recordId);
+      if (!record) continue;
+
+      // 転記済みのみ対象（修正あり/エラー等はスキップ）
+      if (record.transcriptionFlag !== '転記済み') continue;
+
+      // assignId がないと削除→再登録できない
+      if (!record.hamAssignId) {
+        logger.debug(
+          `[${location.name}] SVC-01: ${record.patientName} (${record.visitDate}) ` +
+          `assignId 未設定 → 自動修正スキップ`
+        );
+        continue;
+      }
+
+      // 不一致種類に応じた changeDetail 構築
+      const parts: string[] = [];
+      if (mm.serviceMismatch) {
+        const svc = mm.serviceMismatch;
+        parts.push(`【サービス種別】${svc.hamServiceContent || svc.hamServiceName}→${record.serviceType1}`);
+      }
+      if (mm.timeMismatch) {
+        parts.push(`【終了時刻】HAM=${mm.timeMismatch.hamEndTime}→Sheet=${mm.timeMismatch.sheetsEndTime}`);
+      }
+      if (mm.staffMismatch) {
+        parts.push(`【スタッフ】HAM=${mm.staffMismatch.hamStaffName}→Sheet=${mm.staffMismatch.sheetsStaffName}`);
+      }
+      const changeDetail = parts.join('\n') + `\n検証自動検出: ${this.formatMismatchError(mm)}`;
+
+      // 修正管理Sheetに記録（審計追跡用 — A:F列のみ書き込み、G列以降はSheet側で管理）
+      try {
+        const correctionId = `CORR-VER-${record.recordId}-${Date.now()}`;
+        await this.sheets.appendCorrectionRecord(location.sheetId, {
+          correctionId,
+          recordId: record.recordId,
+          patientName: record.patientName,
+          visitDate: record.visitDate,
+          correctedAt: new Date().toISOString(),
+          changeDetail,
+          // G-J列は appendCorrectionRecord が書き込まない（G列にプルダウン規則あり）
+          status: '', errorLog: '', overwriteDone: '', processedFlag: '',
+        });
+      } catch (corrErr) {
+        logger.warn(
+          `[${location.name}] SVC-01: 修正管理Sheet書き込みエラー (${record.patientName}): ` +
+          `${(corrErr as Error).message}`
+        );
+      }
+
+      const errorType = this.formatMismatchError(mm);
+      const ok = await this.markForCorrection(location.sheetId, record, `[${location.name}] SVC-01`, tab);
+      if (ok) {
+        corrected++;
+        logger.info(
+          `[${location.name}] SVC-01: ${record.patientName} (${record.visitDate} ${record.startTime}) ` +
+          `→「修正あり」設定 (${errorType})`
+        );
+      }
+    }
+
+    return corrected;
   }
 
   /**
@@ -2307,6 +2465,12 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     if (assignId) {
       await this.sheets.writeHamAssignId(sheetId, record.rowIndex, assignId, tab);
     }
+    // 修正あり転記成功 → AC列（検証エラー）をクリア
+    // 次回 verify が再検証し、修正されていれば AC=空のまま、未修正なら AC 再書き込み
+    if (record.transcriptionFlag === '修正あり' && record.verificationError) {
+      await this.sheets.writeVerificationStatus(sheetId, record.rowIndex, '', '', tab);
+      logger.debug(`AC列クリア: ${record.recordId} (修正あり転記成功)`);
+    }
     logger.info(`転記完了: ${record.recordId} - ${record.patientName} (${record.visitDate})`);
 
     // k2_2 の「戻る」ボタンで k2_1（利用者検索）に戻る
@@ -2794,6 +2958,11 @@ export class TranscriptionWorkflow extends BaseWorkflow {
     // HAM assignId を保存（I5 は複数行の場合カンマ区切り）
     if (i5AssignIds.length > 0) {
       await this.sheets.writeHamAssignId(sheetId, record.rowIndex, i5AssignIds.join(','), tab);
+    }
+    // 修正あり転記成功 → AC列（検証エラー）をクリア
+    if (record.transcriptionFlag === '修正あり' && record.verificationError) {
+      await this.sheets.writeVerificationStatus(sheetId, record.rowIndex, '', '', tab);
+      logger.debug(`AC列クリア: ${record.recordId} (I5 修正あり転記成功)`);
     }
     logger.info(`転記完了(I5): ${record.recordId} - ${record.patientName} (${record.visitDate})`);
 

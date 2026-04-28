@@ -124,12 +124,27 @@ export class SpreadsheetService {
     } else if (status === '転記済み') {
       updates.push({ range: `${tab}!${colToLetter(COL_ERROR_DETAIL)}${rowIndex}`, values: [['']] }); // V(21)
     }
-    for (const update of updates) {
+    // 修正あり → verifiedAt(AB) のみクリア、verificationError(AC) は保持
+    // AB クリア: 再転記後に verify() が再検証するために必要（!verifiedAt → 再チェック対象に）
+    // AC 保持: 再転記成功時に processRecord/processI5Record 側でクリアする（AC 残存=未修正の指標）
+    if (status === '修正あり') {
+      updates.push({ range: `${tab}!${colToLetter(COL_VERIFIED_AT)}${rowIndex}`, values: [['']] });        // AB(27)
+    }
+    if (updates.length === 1) {
       await this.sheets.spreadsheets.values.update({
         spreadsheetId: sheetId,
-        range: update.range,
+        range: updates[0].range,
         valueInputOption: 'RAW',
-        requestBody: { values: update.values },
+        requestBody: { values: updates[0].values },
+      });
+    } else {
+      // 複数列を原子的に書き込む（T+V, T+AB 等の中間状態を防止）
+      await this.sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: updates.map(u => ({ range: u.range, values: u.values })),
+        },
       });
     }
     logger.debug(`転記ステータス更新: row=${rowIndex}, status=${status}`);
@@ -158,8 +173,11 @@ export class SpreadsheetService {
   }
 
   /**
-   * 実績ロック（Z列）を解除する（FALSE にクリア）
-   * 看護記録が転記後に更新された場合、再転記を可能にするために使用
+   * 実績ロック（Z列）のチェックを外す。
+   * 看護記録が転記後に更新された場合、再転記を可能にするために使用。
+   *
+   * Google Sheets のチェックボックスは boolean false を USER_ENTERED で
+   * 書き込むことで「未選択」状態になる（文字列 "FALSE" は書き込まない）。
    */
   async unlockRecord(sheetId: string, rowIndex: number, tab?: string): Promise<void> {
     tab = tab || getCurrentMonthTab();
